@@ -39,5 +39,6 @@ between long chapters if the game becomes unstable.
 
 ## Reporting a problem
 
-Open an issue with the chapter, what each player did, and the logs from
-`AliceCoop\logs` of both players (remove personal information first).
+Open an issue with the chapter and what each player did. For logs, set
+`Logs = 1` in `[Debug]` of `AliceCoop.ini` on both PCs, repeat the problem and
+attach the files from `AliceCoop\logs` (remove personal information first).

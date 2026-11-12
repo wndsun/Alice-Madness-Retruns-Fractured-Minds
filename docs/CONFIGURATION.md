@@ -23,8 +23,8 @@ tested defaults - change only what you need.
 | `[Performance]` | `MaxFPS` | `60` | FPS limit (30-120) |
 | | `LowMemoryMode` | `1` | Lighter textures for two 32-bit game processes |
 | `[General]` | `GameConsole` | not set | `0` / `1` turns the F2 console off / on; not set = `EnableConsole` in `MadnessPatch.ini` |
-| `[Debug]` | `Logs` | `1` | `0` disables every file the mod writes |
-| | `DiagTrail` | `1` | Short action trail saved with a crash report |
+| `[Debug]` | `Logs` | `0` | `1` writes logs to `AliceCoop\logs` (needed for bug reports); `0` disables every file the mod writes |
+| | `DiagTrail` | `1` | Short action trail saved with a crash report (only with `Logs = 1`) |
 | | `Dumps` | `0` | Developer research dumps - keep `0` |
 | | `HairRecord`, `EnemyRecord` | `0` | Large developer recordings - keep `0` |
 

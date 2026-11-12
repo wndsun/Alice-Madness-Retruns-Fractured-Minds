@@ -39,5 +39,7 @@ afterwards.
 
 ## The game crashed
 
-Send `AliceCoop\logs\AliceCoop_host_*.log` / `AliceCoop_client_*.log` and the
-`crash_*.txt` file from the game folder, after removing personal information.
+Logs are off by default. Set `Logs = 1` in `[Debug]` of `AliceCoop.ini`,
+reproduce the crash, then send `AliceCoop\logs\AliceCoop_host_*.log` /
+`AliceCoop_client_*.log` and the `crash_*.txt` file from the game folder, after
+removing personal information.
