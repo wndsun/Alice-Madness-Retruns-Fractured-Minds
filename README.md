@@ -1,6 +1,8 @@
 ## Alice Madness Returns Fractured Minds
 
-![Alice Madness Returns Fractured Minds coop](docs/media/spl.png)
+<p align="center">
+  <img src="docs/media//spl.png" width="400" alt="AliceFracturedMinds">
+</p>
 
 Two-player co-op for the PC version of *Alice: Madness Returns*.
 Based on / fork of [Alice Co-op](https://github.com/docwitson/Alice-Madness-Returns-Co-op) by Docwitson, built on [MadnessPatch](https://github.com/Wemino/MadnessPatch).
