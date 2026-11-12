@@ -1,7 +1,7 @@
 ## Alice Madness Returns Fractured Minds
 
 <p align="center">
-  <img src="docs/media//spl.png" width="400" alt="AliceFracturedMinds">
+  <img src="docs/media//spl.png" width="1000" alt="AliceFracturedMinds">
 </p>
 
 Two-player co-op for the PC version of *Alice: Madness Returns*.
