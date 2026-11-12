@@ -1,77 +1,60 @@
-# Development and release process
+# Development and release
 
 ## Toolchain
 
-- Visual Studio 2022
-- Desktop development with C++ workload
-- MSVC v143 x86 tools
-- Windows 10 or Windows 11 SDK
+- Visual Studio 2022 or newer with *Desktop development with C++*
+- MSVC v143 x86 tools and a Windows 10/11 SDK
 - PowerShell 5.1 or later
 
-Clone the repository and build:
+Build:
 
 ```powershell
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe" `
-  .\AliceCoop.sln /m /t:Build "/p:Configuration=Release;Platform=x86"
+msbuild .\AliceCoop.sln /m /t:Build "/p:Configuration=Release;Platform=x86"
 ```
 
-Expected outputs:
+Outputs:
 
 ```text
 bin\Release\dinput8.dll
 bin\Release\AliceCoopServer.exe
 ```
 
-Run the relay self-test:
+Relay self-test:
 
 ```powershell
-& .\bin\Release\AliceCoopServer.exe --self-test
+.\bin\Release\AliceCoopServer.exe --self-test
 ```
 
-## Packaging
+## Release archive
 
 ```powershell
-& .\tools\Build-AliceCoop-Package.ps1 -Version 0.1.0-alpha.1
+.\tools\Build-Release.ps1 -Version 1.0.0
 ```
 
-The script rebuilds `Release|x86`, runs the server self-test, stages installer
-and drop-in packages, writes manifests/checksums, and creates ZIP archives below
-`artifacts\deploy`.
+The script builds `Release|x86`, runs the server self-test and creates
+`artifacts\AliceFracturedMinds-<version>.zip` (its root is the game's
+`Binaries\Win32` folder) and a SHA-256 file. Pushing a tag `v<version>` runs the
+same script on GitHub Actions and creates a draft release with the archive.
 
 ## Source layout
 
 | Path | Purpose |
 | --- | --- |
-| `client/` | Combined MadnessPatch/Alice Co-op DLL project and default patch INI |
-| `server/` | Standalone UDP relay |
-| `src/Coop/` | Protocol integration, proxy, world and lifecycle synchronization |
-| `src/Coop/Detail/` | Internal implementation fragments included only by `CoopClient.cpp` |
+| `client/` | Combined MadnessPatch / co-op DLL project and default `MadnessPatch.ini` |
+| `server/` | Standalone UDP relay (`AliceCoopServer.exe`) |
+| `src/Coop/` | Protocol, remote Alice, shared world and lifecycle synchronization |
 | `src/` | MadnessPatch base and shared hooks/features |
-| `include/` | Project headers, vendored dependencies and UE3 SDK declarations |
-| `lib/` | Vendored x86 static libraries required by the inherited build |
-| `manual-launch/` | Supported host/client/server and local-test scripts |
-| `tools/` | Packaging, installation and uninstallation scripts |
-| `images/` | Alice Co-op-owned runtime overlay images only |
-
-## Testing levels
-
-1. `AliceCoop-Both.bat`: ordinary local smoke test.
-2. `AliceCoop-Animation-Test.bat`: focused animation comparison logs.
-3. `AliceCoop-Diagnostic-Both.bat`: heavier lifecycle diagnostics; do not use for
-   performance measurements.
-4. Two computers over a trusted VPN for latency, join and long-session testing.
-
-Never run destructive save synchronization tests against the only copy of a
-real player profile.
+| `include/` | Project headers (in-game menu: `AchievementOverlay.hpp`), vendored libraries, UE3 SDK declarations |
+| `lib/` | Vendored x86 static libraries |
+| `manual-launch/` | Host / client / server launch scripts |
+| `images/` | Images used by the in-game overlay |
+| `tools/` | Release packaging |
 
 ## Release checklist
 
-- Build from a clean tree.
-- Confirm protocol and manifest versions match.
-- Run server self-test.
-- Scan tracked files and commit history for secrets, logs and private paths.
-- Validate both ZIP layouts and SHA-256 files.
-- Test clean install, update, host, client and uninstall.
-- Create a signed or annotated version tag where practical.
-- Upload both archives and checksums to a draft GitHub Release.
-- Review the repository and Actions logs before changing visibility to public.
+- Build from a clean tree and run the server self-test.
+- Bump `Version` in `src/Coop/Protocol.hpp` when the protocol changes.
+- Make sure `AliceCoop.ini` ships with all `[Trace]`, `HairRecord`,
+  `EnemyRecord` and `Dumps` set to `0`.
+- Test a clean install, host and client.
+- Update `CHANGELOG.md`, create the tag, review the draft release and publish.

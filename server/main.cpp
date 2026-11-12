@@ -229,7 +229,11 @@ namespace
 
 int wmain(int argc, wchar_t** argv)
 {
-	std::wstring bindAddress = L"127.0.0.1";
+	// Listen on every network adapter (LAN, Radmin VPN, Hamachi...) so a
+	// client on another computer can reach the relay. The host's own game
+	// still connects through 127.0.0.1. "--bind 127.0.0.1" restores the
+	// old local-only behaviour.
+	std::wstring bindAddress = L"0.0.0.0";
 	std::uint16_t port = AliceCoopProtocol::DefaultPort;
 	std::filesystem::path logDirectory = L"logs";
 

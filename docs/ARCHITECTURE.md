@@ -2,7 +2,7 @@
 
 ## Process model
 
-Alice Co-op deliberately avoids enabling the unfinished UE3 online subsystem.
+AliceFracturedMinds (like Alice Co-op, which it is forked from) deliberately avoids enabling the unfinished UE3 online subsystem.
 Instead, a normal session consists of three independent processes:
 
 ```text
@@ -16,9 +16,10 @@ of world state.
 
 ## Client injection
 
-`dinput8.dll` is a combined MadnessPatch/Alice Co-op proxy DLL loaded by the game.
-The BAT scripts set per-process environment values for role, relay endpoint,
-window policy and diagnostic modes before starting `AliceMadnessReturns.exe`.
+`dinput8.dll` is a combined MadnessPatch / co-op proxy DLL loaded by the game.
+It reads `AliceCoop\AliceCoop.ini` (role, relay endpoint, options); the in-game
+`M` menu edits the same file. The optional BAT scripts can override the role and
+endpoint for one process through environment variables.
 
 ## Protocol
 
@@ -37,7 +38,7 @@ Both participants must run the same protocol version.
 ## Remote player presentation
 
 Each game spawns a presentation-only `AlicePawn` for the peer. It is not a full
-network pawn and does not execute remote gameplay scripts. Alice Co-op applies
+network pawn and does not execute remote gameplay scripts. The mod applies
 interpolated root transform, safe animation states, cosmetic components, weapon
 presentation and bounded effects. Avoiding remote SpecialMove execution prevents
 the proxy from mutating the locally controlled Alice or world scripts.

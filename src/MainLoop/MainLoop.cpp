@@ -10,7 +10,7 @@ static safetyhook::MidHook ResetSitePost{};
 
 static bool NeedsD3DOverlay()
 {
-	return AchievementSupport || AliceCoop::IsEnabled();
+	return AliceCoop::IsEnabled();
 }
 
 static IDirect3DDevice9* GetD3D9Device()
@@ -51,13 +51,14 @@ static void* __fastcall Loop_Hook(int thisp, int)
 		// Keep diagnostics in AliceCoop logs. The in-game overlay is reserved
 		// for player-facing co-op notifications.
 		AchievementOverlay::SetCoopDevMode(false);
-		if (AchievementSupport)
-		{
-			UpdateAchievementProgress();
-			BlockCameraInMenu::Tick();
-		}
 		AchievementOverlay::Update(GetD3D9Device());
 	}
+
+	// Ghidra FUN_00c361f0 (this hook's target) deletes the deferred-cleanup
+	// list at thisp+0x28 inside the call below and crashed on a null entry
+	// (005ed4bf). Drop null entries first; also marks "engine.tick" for the
+	// AliceCoop crash trail.
+	AliceCoop::ScrubPendingCleanupObjects(static_cast<uintptr_t>(thisp));
 
 	void* result = MainLoop_Hook.fastcall<void*>(thisp);
 

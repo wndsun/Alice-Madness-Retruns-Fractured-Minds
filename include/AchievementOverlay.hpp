@@ -2,14 +2,18 @@
 
 #include <d3d9.h>
 #include <Windows.h>
+#include <TlHelp32.h>
 #include <wincodec.h>
 #include <Xinput.h>
 #include <string>
 #include <vector>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <cwchar>
 #include <cerrno>
 #include <cfloat>
+#include <cmath>
 #include <atomic>
 #include <algorithm>
 #include <filesystem>
@@ -17,12 +21,16 @@
 #include <mutex>
 #include "Common.hpp"
 #include "Features.hpp"
+#include "Coop/CoopClient.hpp"
 
 #include "imgui/imgui.h"
 #include "imgui/imgui_impl_dx9.h"
 #include "imgui/imgui_impl_win32.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+// Trailer camera (N) state, defined in Coop/CoopClient.cpp.
+namespace AliceCoop { bool IsTrailerHudHidden(); bool IsSpectatingHost(); bool IsWatchingPuzzle(); }
 
 namespace AchievementOverlay
 {
@@ -37,11 +45,29 @@ namespace AchievementOverlay
     inline WNDPROC g_oWndProc = nullptr;
     inline uintptr_t g_devicePtrAddr = 0;
 
+    // Shared tutorial boards (co-op): the host turns the pages.
+    // Host: while its board is open, its key presses are collected here and
+    // sent to the client. Client: while the host's board is confirmed open,
+    // its own key presses and clicks do not reach the game; the host's keys
+    // are posted to the window and let through by the pending counters.
+    struct CoopBoardKey
+    {
+        unsigned int vk = 0;
+        long lParam = 0;
+        bool down = false;
+    };
+    inline std::atomic<bool> g_coopBoardInputCapture{ false };
+    inline std::atomic<bool> g_coopBoardInputBlocked{ false };
+    inline std::mutex g_coopBoardKeyMutex;
+    inline std::vector<CoopBoardKey> g_coopBoardKeys;
+    inline std::atomic<int> g_coopBoardInjectPending[256]{};
+
     inline bool g_hooksInstalled = false;
     inline bool g_imguiInitialized = false;
     inline bool g_inReset = false;
     inline bool g_deviceLost = false;
     inline bool g_visible = false;
+    inline bool g_aliceCoopMenuVisible = false;
     inline bool g_coopDevMode = false;
     inline std::string g_coopDevStatus;
     inline std::string g_coopDevDetails;
@@ -72,32 +98,9 @@ namespace AchievementOverlay
     inline float g_uiScale = 1.0f;
     inline float g_pendingScale = 0.0f;
 
-    inline int g_lastDispW = 0;
-    inline int g_lastDispH = 0;
-
-    inline float g_savedScrollY = 0.0f;
-    inline bool g_restoreScroll = false;
-    inline int g_restoreScrollFrames = 0;
-
-    inline XINPUT_STATE g_padState{};
-    inline bool g_padConnected = false;
-
     inline unsigned long long g_lastMouseInputTick = 0;
 
-    struct ToastItem
-    {
-        int achvId;
-        unsigned long long start;
-        unsigned int uid;
-        float height;
-        float animY;
-        bool placed;
-    };
-    inline std::vector<ToastItem> g_toasts;
-    inline unsigned int g_toastNextId = 1;
-    inline std::mutex g_toastMutex;
-
-    // Achievement data
+    // Overlay textures (co-op icons)
     struct Texture
     {
         IDirect3DTexture9* tex = nullptr;
@@ -105,14 +108,13 @@ namespace AchievementOverlay
         int h = 0;
     };
 
-    struct AchievementText
-    {
-        std::string name;
-        std::string desc;
-    };
-
-    inline std::vector<Texture> g_achievements;
     inline Texture g_cutsceneWatchTexture;
+    // Watching the host in the real world (London): fan-drawn icons
+    // images\watch_1.png, watch_2.png, ... (one picked at random per game
+    // start, like omega_X); cutsceneWatch2.png if there is none.
+    inline Texture g_spectateTexture;
+    inline bool g_spectateTextureLoadAttempted = false;
+    inline bool g_showCutsceneWatchIcon = false; // icon removed from the mod
     inline bool g_cutsceneWatchTextureLoadAttempted = false;
     inline Texture g_coopWaitTexture;
     inline bool g_coopWaitTextureLoadAttempted = false;
@@ -146,6 +148,7 @@ namespace AchievementOverlay
     inline std::atomic<int> g_coopSaveSyncProgress{ 0 };
     inline std::atomic<bool> g_coopSaveSyncRequested{ false };
     inline std::atomic<bool> g_coopSaveSyncWarningVisible{ false };
+
     inline std::atomic<bool> g_coopSaveSyncConfirmKeyDown{ false };
 	inline std::atomic<bool> g_coopSaveSyncShortcutDown{ false };
 	inline std::mutex g_coopSaveSyncMutex;
@@ -155,344 +158,10 @@ namespace AchievementOverlay
     inline std::mutex g_coopMenuMutex;
     inline std::string g_coopMenuPeerMap;
     inline std::string g_coopMenuStatus;
-    inline std::vector<bool> g_unlocked;
-    inline std::vector<int> g_current;
-    inline std::vector<AchievementText> g_text;
-
-    inline bool g_achievementsLoaded = false;
-    inline bool g_textLoaded = false;
-    inline std::string g_language = "en";
-
-    inline std::filesystem::path g_achievementFolder;
-    inline std::filesystem::path g_achievementFilePath;
-    inline uint64_t g_unlockedBits = 0; // persistent unlock bitflags
-    inline std::unordered_map<int, int> g_maxOverride; // runtime max overrides read from the game
-    inline std::recursive_mutex g_stateMutex;
-    inline bool g_achievementFileLoaded = false;
-
-    inline constexpr int kAchievementCount = 45;
-    inline float g_ventDuration = 0.0f; // persisted steam-vent timer
-    inline bool g_ventNeedsApply = false; // game-side writes g_ventDuration back into the engine once on load
-
-    inline bool g_showSecrets = false;
-
-    // Secret achievements hidden until unlocked
-    inline const std::vector<int> kSecretIndices = { 1, 2, 3, 4, 5, 6, 7, 13, 14, 15, 16, 17, 18, 19, 31, 33, 35 };
-
-    inline bool IsSecret(int index)
-    {
-        for (int s : kSecretIndices)
-        {
-            if (s == index)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // Target count per achievement, anything not listed is a plain on/off unlock (max 1)
-    inline const std::unordered_map<int, int> kAchievementMax =
-    {
-        { 19, 4 }, { 20, 4 }, { 21, 16 }, { 22, 34 }, { 23, 94 }, { 34, 10 },
-        { 35, 420 }, { 38, 10 }, { 39, 30 }, { 42, 100 }, { 43, 52 },
-    };
-
-    inline int AchievementMaxFrom(const std::unordered_map<int, int>& overrides, int index)
-    {
-        auto ov = overrides.find(index);
-        if (ov != overrides.end())
-        {
-            return ov->second;
-        }
-
-        auto it = kAchievementMax.find(index);
-        return it != kAchievementMax.end() ? it->second : 1;
-    }
-
-    inline int AchievementMax(int index)
-    {
-        std::lock_guard<std::recursive_mutex> lock(g_stateMutex);
-        return AchievementMaxFrom(g_maxOverride, index);
-    }
-
+    // The achievement system has been removed (achievements window, toasts,
+    // Achievements.txt, trophy console hooks). g_visible stays only so the
+    // input/cursor plumbing below keeps compiling; nothing turns it on.
     inline bool IsVisible() { return g_visible; }
-
-    inline void SetAchievementUnlocked(int index, bool unlocked)
-    {
-        if (index < 0) return;
-
-        std::lock_guard<std::recursive_mutex> lock(g_stateMutex);
-
-        if ((int)g_unlocked.size() <= index)
-        {
-            g_unlocked.resize(index + 1, false);
-        }
-
-        g_unlocked[index] = unlocked;
-    }
-
-    // Marks the achievement unlocked with no toast or save, used by the save-load sync
-    inline bool MarkUnlockedSilent(int achvId)
-    {
-        if (achvId < 0 || achvId >= 64)
-            return false;
-
-        std::lock_guard<std::recursive_mutex> lock(g_stateMutex);
-
-        const uint64_t bit = 1ull << achvId;
-        if (g_unlockedBits & bit)
-            return false;
-
-        g_unlockedBits |= bit;
-        SetAchievementUnlocked(achvId, true);
-        return true;
-    }
-
-    // Queue an unlock toast
-    inline void PushToast(int achvId)
-    {
-        ToastItem it{};
-        it.achvId = achvId;
-        it.start = GetTickCount64();
-
-        std::lock_guard<std::mutex> lock(g_toastMutex);
-        it.uid = g_toastNextId++;
-        g_toasts.push_back(it);
-    }
-
-    // Persist the unlock flags and steam-vent timer to Achievements.txt
-    inline void SaveAchievementBits()
-    {
-        std::lock_guard<std::recursive_mutex> lock(g_stateMutex);
-
-        if (g_achievementFilePath.empty())
-            return;
-
-        const std::wstring realPath = g_achievementFilePath.native();
-        const std::wstring tmpPath = realPath + L".tmp";
-
-        {
-            std::ofstream f(tmpPath.c_str(), std::ios::trunc | std::ios::binary);
-            if (!f)
-                return;
-
-            f << "UnlockFlag=" << g_unlockedBits << "\n" << "TotalVentDuration=" << g_ventDuration << "\n";
-            f.flush();
-
-            if (!f)
-            {
-                f.close();
-                DeleteFileW(tmpPath.c_str());
-                return;
-            }
-        }
-
-        if (!MoveFileExW(tmpPath.c_str(), realPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-        {
-            DeleteFileW(tmpPath.c_str());
-            return;
-        }
-
-        g_achievementFileLoaded = true;
-    }
-
-    // Index 0 is the platinum, award it once every other trophy is unlocked
-    inline void AwardPlatinumIfComplete()
-    {
-        std::lock_guard<std::recursive_mutex> lock(g_stateMutex);
-
-        if (g_unlockedBits & 1ull)
-            return;
-
-        uint64_t allOthers = 0;
-        for (int i = 1; i < kAchievementCount; i++)
-        {
-            allOthers |= (1ull << i);
-        }
-
-        if ((g_unlockedBits & allOthers) == allOthers)
-        {
-            g_unlockedBits |= 1ull;
-            SetAchievementUnlocked(0, true);
-            PushToast(0);
-
-            SaveAchievementBits();
-        }
-    }
-
-    inline bool ParseAchievementFile(const std::filesystem::path& path, uint64_t& bitsOut, float& ventOut)
-    {
-        std::error_code ec;
-        if (!std::filesystem::exists(path, ec))
-            return false;
-
-        std::ifstream f(path);
-        if (!f)
-            return false;
-
-        bool found = false;
-        uint64_t bits = 0;
-        float vent = 0.0f;
-
-        std::string line;
-        while (std::getline(f, line))
-        {
-            const size_t eq = line.find('=');
-            if (eq == std::string::npos)
-                continue;
-
-            const std::string key = line.substr(0, eq);
-            const char* val = line.c_str() + eq + 1;
-            if (key == "UnlockFlag")
-            {
-                errno = 0;
-                char* end = nullptr;
-                const uint64_t parsed = std::strtoull(val, &end, 10);
-                if (end == val || errno == ERANGE)
-                    return false;
-
-                bits = parsed;
-                found = true;
-            }
-            else if (key == "TotalVentDuration")
-            {
-                vent = std::strtof(val, nullptr);
-            }
-        }
-
-        if (!found)
-            return false;
-
-        bitsOut = bits;
-        ventOut = (vent >= 0.0f && vent < 1.0e9f) ? vent : 0.0f;
-        return true;
-    }
-
-    // Point the overlay at a profile's Achievements.txt and load it.
-    // Returns true when the file is not there yet, meaning the caller should import from the save
-    inline bool InitAchievementFile(const std::filesystem::path& folder)
-    {
-        std::lock_guard<std::recursive_mutex> lock(g_stateMutex);
-
-        if (folder.empty() || (folder == g_achievementFolder && g_achievementFileLoaded))
-            return false;
-
-        g_achievementFolder = folder;
-        g_achievementFilePath = folder / L"Achievements.txt";
-
-        std::error_code ec;
-        std::filesystem::create_directories(folder, ec);
-
-        uint64_t bits = 0;
-        float vent = 0.0f;
-        const bool loaded = ParseAchievementFile(g_achievementFilePath, bits, vent);
-
-        g_unlockedBits = bits;
-        g_ventDuration = vent;
-        g_ventNeedsApply = true; // game-side restores g_ventDuration into the engine on the next tick
-        g_achievementFileLoaded = loaded;
-
-        if ((int)g_unlocked.size() < 64)
-        {
-            g_unlocked.resize(64, false);
-        }
-        for (int i = 0; i < 64; i++)
-        {
-            g_unlocked[i] = ((g_unlockedBits >> i) & 1ull) != 0;
-        }
-
-        g_current.assign(g_current.size(), 0);
-        g_maxOverride.clear();
-
-        if (!loaded)
-            return true;
-
-        AwardPlatinumIfComplete(); // a save that already holds every non-platinum trophy
-        return false;
-    }
-
-    // Marks the achievement unlocked, saves, and shows a toast only if it wasn't already unlocked
-    inline bool NotifyUnlock(int achvId)
-    {
-        if (achvId < 0 || achvId >= 64)
-            return false;
-
-        std::lock_guard<std::recursive_mutex> lock(g_stateMutex);
-
-        const uint64_t bit = 1ull << achvId;
-        if (g_unlockedBits & bit)
-            return false;
-
-        g_unlockedBits |= bit;
-        SetAchievementUnlocked(achvId, true);
-        PushToast(achvId);
-        SaveAchievementBits();
-
-        if (achvId != 0)
-        {
-            AwardPlatinumIfComplete();
-        }
-
-        return true;
-    }
-
-    // Persist the current steam-vent timer (called when Alice leaves a vent).
-    inline void SaveVentDuration(float seconds)
-    {
-        std::lock_guard<std::recursive_mutex> lock(g_stateMutex);
-
-        g_ventDuration = seconds;
-        SaveAchievementBits();
-    }
-
-    // Runtime max for counters whose total is read from the game
-    inline void SetAchievementMax(int index, int maxValue)
-    {
-        if (index < 0) return;
-
-        std::lock_guard<std::recursive_mutex> lock(g_stateMutex);
-        g_maxOverride[index] = maxValue;
-    }
-
-    // Current progress for an achievement
-    inline void SetAchievementProgress(int index, int current)
-    {
-        if (index < 0) return;
-
-        std::lock_guard<std::recursive_mutex> lock(g_stateMutex);
-
-        if ((int)g_current.size() <= index)
-        {
-            g_current.resize(index + 1, 0);
-        }
-        if (current < 0)
-        {
-            current = 0;
-        }
-
-        g_current[index] = current;
-    }
-
-    // Clear all unlock/progress state so everything shows as locked again, not called automatically
-    inline void ResetProgress()
-    {
-        std::lock_guard<std::recursive_mutex> lock(g_stateMutex);
-
-        g_unlockedBits = 0;
-        g_unlocked.assign(g_unlocked.size(), false);
-        g_current.assign(g_current.size(), 0);
-    }
-
-    // Reloads achievements\txt\<lang>.txt on the next frame
-    inline void SetLanguage(const char* langCode)
-    {
-        if (!langCode || !langCode[0])
-            return;
-
-        g_language = langCode;
-        g_textLoaded = false;
-    }
 
     // Helpers
     inline IDirect3DDevice9* GetDevice()
@@ -594,20 +263,6 @@ namespace AchievementOverlay
         return ok;
     }
 
-    inline void ReleaseAchievements()
-    {
-        for (auto& a : g_achievements)
-        {
-            if (a.tex)
-            {
-                a.tex->Release();
-            }
-        }
-
-        g_achievements.clear();
-        g_achievementsLoaded = false;
-    }
-
     inline void ReleaseCutsceneWatchTexture()
     {
         if (g_cutsceneWatchTexture.tex)
@@ -675,108 +330,6 @@ namespace AchievementOverlay
             dev, path.c_str(), g_soloMinigameTexture, target);
     }
 
-    inline void LoadAchievements(IDirect3DDevice9* dev)
-    {
-        if (g_achievementsLoaded || !dev)
-            return;
-
-        g_achievementsLoaded = true;
-
-        int target = (int)(64.0f * g_uiScale + 0.5f); // icons draw at 64 * g_uiScale, load them ~1:1
-
-        std::string dir = SystemHelper::GetModulePath() + "\\achievements\\img\\";
-        for (int i = 0; ; i++)
-        {
-            std::string p = dir + std::to_string(i) + ".png";
-            if (GetFileAttributesA(p.c_str()) == INVALID_FILE_ATTRIBUTES)
-            {
-                break;
-            }
-
-            Texture t;
-            LoadTextureFromFile(dev, p.c_str(), t, target); // keep index alignment even if a load fails
-            g_achievements.push_back(t);
-        }
-
-        {
-            std::lock_guard<std::recursive_mutex> lock(g_stateMutex);
-
-            if (g_unlocked.size() < g_achievements.size())
-            {
-                g_unlocked.resize(g_achievements.size(), false);
-            }
-            if (g_current.size() < g_achievements.size())
-            {
-                g_current.resize(g_achievements.size(), 0);
-            }
-        }
-    }
-
-    inline void LoadText()
-    {
-        if (g_textLoaded) return;
-
-        g_textLoaded = true;
-        g_text.clear();
-
-        std::string path = SystemHelper::GetModulePath() + "\\achievements\\txt\\" + g_language + ".txt";
-
-        FILE* f = nullptr;
-        if (fopen_s(&f, path.c_str(), "rb") != 0 || !f)
-        {
-            return;
-        }
-
-        fseek(f, 0, SEEK_END);
-        long size = ftell(f);
-        fseek(f, 0, SEEK_SET);
-
-        std::string buf;
-        if (size > 0)
-        {
-            buf.resize(size);
-            fread(&buf[0], 1, size, f);
-        }
-
-        fclose(f);
-
-        size_t pos = 0;
-        if (buf.size() >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF)
-        {
-            pos = 3; // skip UTF-8 BOM
-        }
-
-        while (pos < buf.size())
-        {
-            size_t eol = buf.find('\n', pos);
-            std::string line = (eol == std::string::npos) ? buf.substr(pos) : buf.substr(pos, eol - pos);
-            pos = (eol == std::string::npos) ? buf.size() : eol + 1;
-
-            if (!line.empty() && line.back() == '\r')
-            {
-                line.pop_back();
-            }
-            if (line.empty())
-            {
-                continue;
-            }
-
-            AchievementText at;
-            size_t bar = line.find('|');
-            if (bar == std::string::npos)
-            {
-                at.name = line;
-            }
-            else
-            {
-                at.name = line.substr(0, bar);
-                at.desc = line.substr(bar + 1);
-            }
-
-            g_text.push_back(at);
-        }
-    }
-
     // ImGui setup
     inline void InitImGui(IDirect3DDevice9* pDevice)
     {
@@ -822,22 +375,6 @@ namespace AchievementOverlay
 
         g_imguiInitialized = false;
         g_pInitializedDevice = nullptr;
-    }
-
-    // Input
-    inline float GetControllerScrollAxis()
-    {
-        if (!g_padConnected) return 0.0f;
-
-        const short dz = XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE;
-        short ly = g_padState.Gamepad.sThumbLY;
-
-        if (ly > dz)
-            return (float)(ly - dz) / (float)(32767 - dz);
-        if (ly < -dz)
-            return (float)(ly + dz) / (float)(32768 - dz);
-
-        return 0.0f;
     }
 
     // Rendering
@@ -918,34 +455,14 @@ namespace AchievementOverlay
 		g_coopSaveSyncConfirmKeyDown.store(
 			confirmDown, std::memory_order_relaxed);
 
-		const bool saveSyncKeyDown =
-			(GetAsyncKeyState('K') & 0x8000) != 0;
-		if (saveSyncKeyDown
-			&& !g_coopSaveSyncShortcutDown.load(std::memory_order_relaxed)
-			&& !confirmVisible
-			&& g_coopMenuVisible.load(std::memory_order_acquire)
-			&& !g_coopMenuHostRole.load(std::memory_order_acquire)
-			&& g_coopSaveSyncAvailable.load(std::memory_order_acquire)
-			&& !g_coopSaveSyncInProgress.load(std::memory_order_acquire))
-		{
-			g_coopSaveSyncWarningVisible.store(
-				true, std::memory_order_release);
-		}
-		g_coopSaveSyncShortcutDown.store(
-			saveSyncKeyDown, std::memory_order_relaxed);
-
         const bool keyDown =
             (GetAsyncKeyState('L') & 0x8000) != 0;
         if (keyDown && !g_coopContextShortcutDown)
         {
             // L is deliberately contextual: outside a visible co-op action it
             // remains an ordinary game key and cannot queue a later command.
-            if (g_coopWaitingForPeer.load(std::memory_order_acquire))
-            {
-                g_coopForceCutsceneRequested.store(
-                    true, std::memory_order_release);
-            }
-            else if (g_coopMenuVisible.load(std::memory_order_acquire)
+            // (readycheck4: L no longer forces a held cutscene to start.)
+            if (g_coopMenuVisible.load(std::memory_order_acquire)
                 && !g_coopMenuHostRole.load(std::memory_order_acquire)
                 && g_coopMenuCanJoinHost.load(std::memory_order_acquire))
             {
@@ -960,6 +477,517 @@ namespace AchievementOverlay
     {
         g_coopDevCommand.store(
             static_cast<int>(command), std::memory_order_release);
+    }
+
+    // --------------------------------------------------------------
+    // In-game AliceCoop settings menu (toggled with 'M'). Reuses the
+    // same [Network] keys in AliceCoop.ini that the external launcher
+    // already writes, so both stay consistent. Values are only applied
+    // on the *next* launch — not live-reconnected mid-session, since
+    // that would require rebuilding how the relay connection is set up,
+    // which is a separate, riskier piece of work.
+    //
+    // Uses plain std::string + the ANSI (A-suffixed) ini functions,
+    // matching how the rest of this file already builds paths via
+    // SystemHelper::GetModulePath() (a narrow std::string) — see the
+    // existing texture loading code above for the same
+    // pattern.
+    // --------------------------------------------------------------
+    static char g_menuServerAddress[64] = "127.0.0.1";
+    static char g_menuPort[8] = "27018";
+    static int g_menuRoleIndex = 0; // 0 = Host, 1 = Client
+    static bool g_menuValuesLoaded = false;
+    static bool g_menuJustSaved = false;
+
+    // Server-launch verification state. CreateProcess succeeding only means
+    // Windows managed to start the executable — it doesn't rule out the
+    // server crashing immediately after (e.g. its UDP port already being in
+    // use by something else). We keep the process handle open briefly and
+    // re-check it a moment later rather than trusting the launch call alone.
+    static HANDLE g_menuServerProcessHandle = nullptr;
+    static DWORD g_menuServerCheckDeadlineMs = 0;
+    static bool g_menuServerCheckPending = false;
+    static bool g_menuServerConfirmedRunning = false;
+    static bool g_menuServerLaunchFailed = false;
+
+    inline std::string AliceCoopMenu_IniPath()
+    {
+        return SystemHelper::GetModulePath() + "\\AliceCoop\\AliceCoop.ini";
+    }
+
+    inline void AliceCoopMenu_LoadFromIniIfNeeded()
+    {
+        if (g_menuValuesLoaded)
+            return;
+        g_menuValuesLoaded = true;
+
+        const std::string iniPath = AliceCoopMenu_IniPath();
+
+        char role[16] = "host";
+        GetPrivateProfileStringA("Network", "Role", "host",
+            role, sizeof(role), iniPath.c_str());
+        g_menuRoleIndex = (_stricmp(role, "client") == 0) ? 1 : 0;
+
+        GetPrivateProfileStringA("Network", "ServerAddress", "127.0.0.1",
+            g_menuServerAddress, sizeof(g_menuServerAddress), iniPath.c_str());
+        GetPrivateProfileStringA("Network", "Port", "27018",
+            g_menuPort, sizeof(g_menuPort), iniPath.c_str());
+    }
+
+    // Finds the PID of a running process by its exact executable name, or 0
+    // if none is found. Shared by AliceCoopMenu_IsProcessRunning() and
+    // AliceCoopMenu_StopServerIfRunning() below.
+    //
+    // Takes a wide string and uses the plain (non-suffixed) PROCESSENTRY32 /
+    // Process32First / Process32Next names rather than forcing the ANSI
+    // "...A" variants: this project builds with UNICODE defined, and only
+    // the macro-redirected plain names resolve correctly here (the explicit
+    // "...A" names failed to compile at all) — so we go along with that
+    // instead of fighting it.
+    inline DWORD AliceCoopMenu_FindProcessId(const wchar_t* exeName)
+    {
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snapshot == INVALID_HANDLE_VALUE)
+            return 0;
+
+        PROCESSENTRY32 entry{};
+        entry.dwSize = sizeof(entry);
+
+        DWORD foundPid = 0;
+        if (Process32First(snapshot, &entry))
+        {
+            do
+            {
+                if (_wcsicmp(entry.szExeFile, exeName) == 0)
+                {
+                    foundPid = entry.th32ProcessID;
+                    break;
+                }
+            } while (Process32Next(snapshot, &entry));
+        }
+
+        CloseHandle(snapshot);
+        return foundPid;
+    }
+
+    // Checks whether a process with this exact executable name is already
+    // running, so clicking Save repeatedly (or already having the server up
+    // from a previous session) never launches a second, competing relay
+    // fighting over the same UDP port.
+    inline bool AliceCoopMenu_IsProcessRunning(const wchar_t* exeName)
+    {
+        return AliceCoopMenu_FindProcessId(exeName) != 0;
+    }
+
+    // Closes AliceCoopServer.exe if it's currently running. Called when the
+    // player switches the role selector from Host to Client — if you were
+    // hosting and change your mind, there is no reason to leave the relay
+    // running in the background with nobody left to serve.
+    inline void AliceCoopMenu_StopServerIfRunning()
+    {
+        const DWORD pid = AliceCoopMenu_FindProcessId(L"AliceCoopServer.exe");
+        if (pid == 0)
+            return;
+
+        HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+        if (process)
+        {
+            TerminateProcess(process, 0);
+            CloseHandle(process);
+        }
+    }
+
+    // Launches AliceCoopServer.exe with no visible console window (in place
+    // of the separate cmd/AliceCoop-Server.bat window this used to require).
+    // CREATE_NO_WINDOW is the standard flag for exactly this: it still runs
+    // as a normal console-subsystem process, just without ever allocating a
+    // visible console.
+    inline void AliceCoopMenu_StartServerHidden()
+    {
+        if (AliceCoopMenu_IsProcessRunning(L"AliceCoopServer.exe"))
+        {
+            g_menuServerConfirmedRunning = true;
+            g_menuServerLaunchFailed = false;
+            g_menuServerCheckPending = false;
+            return;
+        }
+
+        const std::string exePath = SystemHelper::GetModulePath() + "\\AliceCoop\\AliceCoopServer.exe";
+        const std::string workingDir = SystemHelper::GetModulePath() + "\\AliceCoop";
+
+        STARTUPINFOA startupInfo{};
+        startupInfo.cb = sizeof(startupInfo);
+
+        PROCESS_INFORMATION processInfo{};
+        const BOOL started = CreateProcessA(
+            exePath.c_str(),
+            nullptr,
+            nullptr, nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            workingDir.c_str(),
+            &startupInfo, &processInfo);
+
+        if (!started)
+        {
+            g_menuServerConfirmedRunning = false;
+            g_menuServerLaunchFailed = true;
+            g_menuServerCheckPending = false;
+            return;
+        }
+
+        CloseHandle(processInfo.hThread);
+
+        // Don't verify success yet — hold the process handle and check back
+        // in a few hundred milliseconds, once the server has had a real
+        // chance to either settle in or crash on startup.
+        g_menuServerProcessHandle = processInfo.hProcess;
+        g_menuServerCheckDeadlineMs = GetTickCount() + 500;
+        g_menuServerCheckPending = true;
+        g_menuServerConfirmedRunning = false;
+        g_menuServerLaunchFailed = false;
+    }
+
+    // Call once per frame while the menu is open. Cheap no-op until the
+    // deadline set by AliceCoopMenu_StartServerHidden() actually arrives.
+    inline void AliceCoopMenu_PollServerCheck()
+    {
+        if (!g_menuServerCheckPending)
+            return;
+        if (GetTickCount() < g_menuServerCheckDeadlineMs)
+            return;
+
+        DWORD exitCode = 0;
+        const bool stillRunning = g_menuServerProcessHandle
+            && GetExitCodeProcess(g_menuServerProcessHandle, &exitCode)
+            && exitCode == STILL_ACTIVE;
+
+        g_menuServerConfirmedRunning = stillRunning;
+        g_menuServerLaunchFailed = !stillRunning;
+
+        if (g_menuServerProcessHandle)
+        {
+            CloseHandle(g_menuServerProcessHandle);
+            g_menuServerProcessHandle = nullptr;
+        }
+        g_menuServerCheckPending = false;
+    }
+
+    static bool g_menuLiveEndpointApplied = false;
+
+    // Logo (shown above the status line in the settings menu) and the
+    // blinking indicator icon (shown when the menu is closed) — both PNGs,
+    // loaded once on first use and cached. Load failures are silent: the
+    // menu/indicator simply skip drawing the image if the file isn't there
+    // yet, rather than breaking anything.
+    static Texture g_menuLogoTexture;
+    static bool g_menuLogoLoadAttempted = false;
+    static Texture g_menuIndicatorTexture;
+    static bool g_menuIndicatorLoadAttempted = false;
+
+    inline void AliceCoopMenu_LoadImagesIfNeeded(IDirect3DDevice9* pDevice)
+    {
+        if (!g_menuLogoLoadAttempted)
+        {
+            g_menuLogoLoadAttempted = true;
+            const std::string path = SystemHelper::GetModulePath() + "\\AliceCoop\\images\\logo.png";
+            LoadTextureFromFile(pDevice, path.c_str(), g_menuLogoTexture);
+        }
+        if (!g_menuIndicatorLoadAttempted)
+        {
+            g_menuIndicatorLoadAttempted = true;
+            // Fan-drawn indicator icons: images\omega_1.png, omega_2.png, ...
+            // (as many as there are, counted from 1 until the first gap).
+            // One is picked at random once per game start.
+            const std::string folder = SystemHelper::GetModulePath() + "\\AliceCoop\\images\\";
+            int count = 0;
+            while (count < 999)
+            {
+                const std::string candidate = folder + "omega_" + std::to_string(count + 1) + ".png";
+                if (GetFileAttributesA(candidate.c_str()) == INVALID_FILE_ATTRIBUTES)
+                    break;
+                ++count;
+            }
+            std::string path;
+            if (count > 0)
+            {
+                LARGE_INTEGER ticks{};
+                QueryPerformanceCounter(&ticks);
+                const unsigned long long seed = static_cast<unsigned long long>(ticks.QuadPart)
+                    ^ (static_cast<unsigned long long>(GetCurrentProcessId()) << 16);
+                const int pick = static_cast<int>(seed % static_cast<unsigned long long>(count)) + 1;
+                path = folder + "omega_" + std::to_string(pick) + ".png";
+            }
+            else
+            {
+                path = folder + "indicator.png"; // old name, if no omega_X is there
+            }
+            LoadTextureFromFile(pDevice, path.c_str(), g_menuIndicatorTexture);
+        }
+    }
+
+    inline void AliceCoopMenu_SaveToIni()
+    {
+        const std::string iniPath = AliceCoopMenu_IniPath();
+        const char* roleValue = (g_menuRoleIndex == 1) ? "client" : "host";
+        WritePrivateProfileStringA("Network", "Role", roleValue, iniPath.c_str());
+        WritePrivateProfileStringA("Network", "ServerAddress", g_menuServerAddress, iniPath.c_str());
+        WritePrivateProfileStringA("Network", "Port", g_menuPort, iniPath.c_str());
+
+        // The address/port change applies immediately — g_serverEndpoint is
+        // just "where the next packet goes", read fresh on every send, so
+        // there's no socket to tear down or reconnect. The Role itself is
+        // NOT applied live (switching Host<->Client changes whether a local
+        // relay is expected at all, which is a bigger, riskier change to
+        // make mid-session) — that part still only takes effect next launch.
+        const int portNumber = std::atoi(g_menuPort);
+        g_menuLiveEndpointApplied = AliceCoop::SetServerEndpoint(g_menuServerAddress, portNumber);
+
+        // Host needs the relay running; Client just connects to one that's
+        // (presumably) already running on the host's machine — nothing to
+        // start locally for that role.
+        if (g_menuRoleIndex == 0)
+        {
+            AliceCoopMenu_StartServerHidden();
+        }
+    }
+
+    // Small blinking indicator + key hint, shown whenever the settings menu
+    // is closed — a quiet "the mod is here, press M" signal rather than a
+    // full status panel. Hidden while the menu itself is open, and reappears
+    // once it's closed again.
+    inline void DrawAliceCoopIndicatorIcon(IDirect3DDevice9* pDevice)
+    {
+        if (g_aliceCoopMenuVisible)
+            return;
+        // Only on the title/main menu and on the pause menu - never over
+        // gameplay. (It used to be drawn whenever the settings menu was
+        // closed, i.e. all the time.)
+        if (!g_coopMenuVisible.load(std::memory_order_acquire)
+            && !g_coopPauseVisible.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
+        AliceCoopMenu_LoadImagesIfNeeded(pDevice);
+        if (!g_menuIndicatorTexture.tex)
+            return;
+
+        const float scale = g_uiScale;
+
+        // Size follows the image's own proportions rather than forcing a
+        // fixed square — the longest side is capped at kMaxIconSize so an
+        // unexpectedly large source image never dominates the screen, but
+        // nothing stretches or distorts the aspect ratio to fill a box.
+        constexpr float kMaxIconSide = 180.0f;
+        const float nativeW = static_cast<float>(g_menuIndicatorTexture.w);
+        const float nativeH = static_cast<float>(g_menuIndicatorTexture.h);
+        const float longestSide = (nativeW > nativeH) ? nativeW : nativeH;
+        const float fitRatio = (longestSide > kMaxIconSide) ? (kMaxIconSide / longestSide) : 1.0f;
+        const float iconWidth = nativeW * fitRatio * scale;
+        const float iconHeight = nativeH * fitRatio * scale;
+
+        // Client only, and only once the HOST is confirmed to actually be
+        // in a real level (not just "a relay exists" — that was the bug:
+        // AliceCoop::IsHostInGameplay() specifically checks the host's
+        // reported map isn't the menu/placeholder level). While that's true
+        // and the peer isn't visible yet, blink faster and add a "Press L"
+        // hint (L is the mod's existing join/force-cutscene key) — a nudge
+        // that the client still needs to press it to actually join. Once a
+        // peer is visible, this reverts to the normal slow pulse with just
+        // the base "Press M" hint.
+        const std::string statusLine = AliceCoop::GetOverlayStatusLine();
+        const bool isClient = statusLine.find("CLIENT") != std::string::npos;
+        const bool waitingForPeer = statusLine.find("WAITING FOR PEER") != std::string::npos;
+        const bool showJoinHint = isClient && waitingForPeer && AliceCoop::IsHostInGameplay();
+
+        const float pulsePeriodMs = showJoinHint ? 700.0f : 2000.0f;
+        const float phase = static_cast<float>(GetTickCount() % static_cast<unsigned int>(pulsePeriodMs)) / pulsePeriodMs;
+        const float pulse = 0.5f + 0.5f * sinf(phase * 6.2831853f);
+        const float alpha = 0.35f + 0.65f * pulse;
+
+        const ImGuiIO& io = ImGui::GetIO();
+        const ImVec2 iconMin(
+            18.0f * scale,
+            io.DisplaySize.y - iconHeight - 46.0f * scale);
+        const ImVec2 iconMax(iconMin.x + iconWidth, iconMin.y + iconHeight);
+
+        ImDrawList* drawList = ImGui::GetForegroundDrawList();
+        drawList->AddImage(
+            reinterpret_cast<ImTextureID>(g_menuIndicatorTexture.tex),
+            iconMin, iconMax,
+            ImVec2(0, 0), ImVec2(1, 1),
+            IM_COL32(255, 255, 255, static_cast<int>(alpha * 255.0f)));
+
+        constexpr const char* hintM = "Press M";
+        const ImVec2 hintMSize = ImGui::CalcTextSize(hintM);
+        const ImVec2 hintMPos(
+            iconMin.x + (iconWidth - hintMSize.x) * 0.5f,
+            iconMax.y + 6.0f * scale);
+        drawList->AddText(
+            hintMPos,
+            IM_COL32(235, 220, 225, static_cast<int>(alpha * 255.0f)),
+            hintM);
+
+        if (showJoinHint)
+        {
+            constexpr const char* hintL = "Press L to let a friend join";
+            const ImVec2 hintLSize = ImGui::CalcTextSize(hintL);
+            const ImVec2 hintLPos(
+                iconMin.x + (iconWidth - hintLSize.x) * 0.5f,
+                hintMPos.y + hintMSize.y + 4.0f * scale);
+            drawList->AddText(
+                hintLPos,
+                IM_COL32(255, 191, 91, static_cast<int>(alpha * 255.0f)),
+                hintL);
+        }
+    }
+
+    inline void DrawAliceCoopMenu(IDirect3DDevice9* pDevice)
+    {
+        if (!g_aliceCoopMenuVisible)
+            return;
+
+        AliceCoopMenu_LoadFromIniIfNeeded();
+        AliceCoopMenu_PollServerCheck();
+        AliceCoopMenu_LoadImagesIfNeeded(pDevice);
+
+        const float scale = g_uiScale;
+        // menulogo1 (11.11, the new design): the logo (images\logo.png) sits
+        // ABOVE the menu panel, outside it and without a frame, centred on
+        // the panel; the panel itself is unchanged. Its size follows the
+        // image's proportions, at most the panel's width.
+        const bool haveLogo = g_menuLogoTexture.tex && g_menuLogoTexture.w > 0 && g_menuLogoTexture.h > 0;
+        const float logoAspect = haveLogo
+            ? static_cast<float>(g_menuLogoTexture.h) / static_cast<float>(g_menuLogoTexture.w) : 0.0f;
+        const float logoMaxWidth = 400.0f * scale;
+        const float logoNativeWidth = haveLogo ? static_cast<float>(g_menuLogoTexture.w) * scale : 0.0f;
+        const float logoWidth = haveLogo ? (logoNativeWidth < logoMaxWidth ? logoNativeWidth : logoMaxWidth) : 0.0f;
+        const float logoHeight = logoWidth * logoAspect;
+        const float logoGap = 6.0f * scale;
+        // menupos1: on every opening (M) the menu sits at the left, centred
+        // vertically together with the logo above it (pivot = the panel's
+        // vertical middle, shifted down by half the logo block).
+        const ImVec2 display = ImGui::GetIO().DisplaySize;
+        const float logoBlock = haveLogo ? logoHeight + logoGap : 0.0f;
+        ImGui::SetNextWindowPos(
+            ImVec2(16.0f * scale, display.y * 0.5f + logoBlock * 0.5f),
+            ImGuiCond_Appearing,
+            ImVec2(0.0f, 0.5f));
+        ImGui::SetNextWindowSize(
+            ImVec2(430.0f * scale, 0.0f),
+            ImGuiCond_FirstUseEver);
+        constexpr ImGuiWindowFlags flags =
+            ImGuiWindowFlags_NoCollapse
+            | ImGuiWindowFlags_NoSavedSettings
+            | ImGuiWindowFlags_AlwaysAutoResize
+            | ImGuiWindowFlags_NoTitleBar;
+
+        // Dark burgundy theme, matching the game's own palette. Pushed
+        // before Begin (so the window background itself picks it up) and
+        // popped after End — always both, regardless of what Begin returns,
+        // since Begin/End must always be paired and the colors need to wrap
+        // that whole pair.
+        constexpr int kStyleColorCount = 9;
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.03f, 0.04f, 0.97f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.45f, 0.08f, 0.10f, 0.85f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.88f, 0.85f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.35f, 0.08f, 0.10f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.55f, 0.12f, 0.14f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.65f, 0.15f, 0.17f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.16f, 0.06f, 0.07f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.22f, 0.08f, 0.09f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(0.85f, 0.25f, 0.20f, 1.0f));
+
+        if (ImGui::Begin("AliceFracturedMinds", &g_aliceCoopMenuVisible, flags))
+        {
+            if (haveLogo)
+            {
+                // Drawn behind the menu, above its top edge, centred on it.
+                const ImVec2 windowPos = ImGui::GetWindowPos();
+                const ImVec2 windowSize = ImGui::GetWindowSize();
+                const float width = logoWidth;
+                const float height = logoHeight;
+                ImVec2 logoMin(windowPos.x + (windowSize.x - width) * 0.5f,
+                    windowPos.y - height - logoGap);
+                if (logoMin.x < 0.0f)
+                    logoMin.x = 0.0f;
+                if (logoMin.y < 0.0f)
+                    logoMin.y = 0.0f;
+                ImGui::GetBackgroundDrawList()->AddImage(
+                    reinterpret_cast<ImTextureID>(g_menuLogoTexture.tex),
+                    logoMin, ImVec2(logoMin.x + width, logoMin.y + height));
+            }
+
+            // Re-read every frame the menu is open, so this always reflects
+            // the current live state — not a cached snapshot from when the
+            // menu was opened.
+            const std::string statusLine = AliceCoop::GetOverlayStatusLine();
+            if (!statusLine.empty())
+            {
+                const bool online = statusLine.find("RELAY ONLINE") != std::string::npos;
+                ImGui::TextColored(
+                    online ? ImVec4(0.4f, 0.9f, 0.4f, 1.0f) : ImVec4(0.9f, 0.7f, 0.3f, 1.0f),
+                    "%s", statusLine.c_str());
+            }
+            else
+            {
+                ImGui::TextDisabled("Not connected yet.");
+            }
+            ImGui::Spacing();
+
+            ImGui::TextDisabled("Server address/port apply immediately. Role change needs a restart.");
+            ImGui::Spacing();
+
+            ImGui::RadioButton("Host", &g_menuRoleIndex, 0);
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Client", &g_menuRoleIndex, 1))
+            {
+                // Just switched to Client — if a relay was running from an
+                // earlier Host session, there's no one left for it to serve.
+                AliceCoopMenu_StopServerIfRunning();
+            }
+
+            ImGui::InputText("Server address", g_menuServerAddress, sizeof(g_menuServerAddress));
+            ImGui::InputText("Port", g_menuPort, sizeof(g_menuPort));
+
+            ImGui::Spacing();
+            if (ImGui::Button("Save"))
+            {
+                AliceCoopMenu_SaveToIni();
+                g_menuJustSaved = true;
+            }
+
+            if (g_menuJustSaved)
+            {
+                if (!g_menuLiveEndpointApplied)
+                {
+                    ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f),
+                        "Saved, but the address wasn't a valid IPv4 address — not applied.");
+                }
+                else if (g_menuRoleIndex != 0)
+                {
+                    // Client role never launches a server — nothing further
+                    // to verify, the address/port change alone is enough.
+                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "Saved and applied.");
+                }
+                else if (g_menuServerCheckPending)
+                {
+                    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.4f, 1.0f), "Saved and applied. Starting server...");
+                }
+                else if (g_menuServerConfirmedRunning)
+                {
+                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "Saved and applied. Server running.");
+                }
+                else if (g_menuServerLaunchFailed)
+                {
+                    ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "Saved and applied. Server failed to start!");
+                }
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleColor(kStyleColorCount);
     }
 
     inline void DrawCoopDevInteractivePanel()
@@ -999,7 +1027,9 @@ namespace AchievementOverlay
 
     inline void DrawPeerCutsceneIndicator(IDirect3DDevice9* pDevice)
     {
-        if (!g_peerWatchingCutscene.load(std::memory_order_acquire))
+        // The cutsceneWatch2 icon was removed from the mod (25.10).
+        if (!g_showCutsceneWatchIcon
+            || !g_peerWatchingCutscene.load(std::memory_order_acquire))
             return;
 
         LoadCutsceneWatchTexture(pDevice);
@@ -1033,16 +1063,84 @@ namespace AchievementOverlay
         }
     }
 
+    inline void DrawSpectateIndicator(IDirect3DDevice9* pDevice)
+    {
+        // chesswatch1: also while the other player solves a puzzle
+        if (!AliceCoop::IsSpectatingHost() && !AliceCoop::IsWatchingPuzzle())
+            return;
+        if (!g_spectateTextureLoadAttempted && pDevice)
+        {
+            g_spectateTextureLoadAttempted = true;
+            const std::string folder = SystemHelper::GetModulePath() + "\\AliceCoop\\images\\";
+            int count = 0;
+            while (count < 999)
+            {
+                const std::string candidate = folder + "watch_" + std::to_string(count + 1) + ".png";
+                if (GetFileAttributesA(candidate.c_str()) == INVALID_FILE_ATTRIBUTES)
+                    break;
+                ++count;
+            }
+            std::string path = folder + "cutsceneWatch2.png";
+            if (count > 0)
+            {
+                LARGE_INTEGER ticks{};
+                QueryPerformanceCounter(&ticks);
+                const unsigned long long seed = static_cast<unsigned long long>(ticks.QuadPart)
+                    ^ (static_cast<unsigned long long>(GetCurrentProcessId()) << 20);
+                const int pick = static_cast<int>(seed % static_cast<unsigned long long>(count)) + 1;
+                path = folder + "watch_" + std::to_string(pick) + ".png";
+            }
+            // watchsize1: the picture is loaded at its own size (no resize)
+            LoadTextureFromFile(pDevice, path.c_str(), g_spectateTexture, 0);
+        }
+        const float scale = g_uiScale;
+        const float margin = 18.0f * scale;
+        const ImGuiIO& io = ImGui::GetIO();
+        // watchsize1 (08.11 request): the watch_X icon is drawn at the size
+        // of the image itself (times the UI scale), keeping its proportions;
+        // a huge one is limited to a third of the screen height.
+        float iconWidth = 58.0f * scale;
+        float iconHeight = 58.0f * scale;
+        if (g_spectateTexture.tex && g_spectateTexture.w > 0 && g_spectateTexture.h > 0)
+        {
+            iconWidth = static_cast<float>(g_spectateTexture.w) * scale;
+            iconHeight = static_cast<float>(g_spectateTexture.h) * scale;
+            const float maxHeight = io.DisplaySize.y / 3.0f;
+            if (iconHeight > maxHeight && iconHeight > 0.0f)
+            {
+                iconWidth *= maxHeight / iconHeight;
+                iconHeight = maxHeight;
+            }
+        }
+        const float iconSize = iconHeight < iconWidth ? iconHeight : iconWidth;
+        ImDrawList* drawList = ImGui::GetForegroundDrawList();
+        const float x = io.DisplaySize.x - margin - iconWidth;
+        const ImVec2 iconMinimum(x > margin ? x : margin, margin);
+        const ImVec2 iconMaximum(iconMinimum.x + iconWidth, iconMinimum.y + iconHeight);
+        if (g_spectateTexture.tex)
+        {
+            drawList->AddImage((ImTextureID)(uintptr_t)g_spectateTexture.tex,
+                iconMinimum, iconMaximum);
+        }
+        else
+        {
+            drawList->AddCircle(ImVec2(iconMinimum.x + iconSize * 0.5f,
+                iconMinimum.y + iconSize * 0.5f), iconSize * 0.34f,
+                IM_COL32(244, 205, 92, 235), 24, 2.0f * scale);
+        }
+    }
+
     inline void DrawCoopWaitIndicator(IDirect3DDevice9* pDevice)
     {
         if (!g_coopWaitingForPeer.load(std::memory_order_acquire))
             return;
 
-        LoadCoopWaitTexture(pDevice);
+        // No aliceWhait icon any more (removed from the mod): text only.
+        (void)pDevice;
         const float scale = g_uiScale;
         const float panelWidth = 445.0f * scale;
         const float panelHeight = 100.0f * scale;
-        const float iconSize = 58.0f * scale;
+        const float iconSize = 0.0f;
         const float panelTop = 62.0f * scale;
         const float padding = 12.0f * scale;
         const ImGuiIO& io = ImGui::GetIO();
@@ -1067,21 +1165,6 @@ namespace AchievementOverlay
             panelMinimum, panelMaximum,
             IM_COL32(213, 193, 225, 185),
             9.0f * scale, 0, 1.2f * scale);
-        if (g_coopWaitTexture.tex)
-        {
-            drawList->AddImage(
-                (ImTextureID)(uintptr_t)g_coopWaitTexture.tex,
-                iconMinimum, iconMaximum);
-        }
-        else
-        {
-            drawList->AddCircle(
-                ImVec2(iconMinimum.x + iconSize * 0.5f,
-                    iconMinimum.y + iconSize * 0.5f),
-                iconSize * 0.34f,
-                IM_COL32(244, 205, 92, 235),
-                28, 2.0f * scale);
-        }
         const char* message = "Waiting for the other player...";
         const ImVec2 textSize = ImGui::CalcTextSize(message);
         const ImVec2 textPosition(
@@ -1233,17 +1316,6 @@ namespace AchievementOverlay
             g_coopMenuPeerConnected.load(std::memory_order_acquire);
         const bool canJoin =
             g_coopMenuCanJoinHost.load(std::memory_order_acquire);
-		const bool saveSyncAvailable =
-			g_coopSaveSyncAvailable.load(std::memory_order_acquire);
-		const bool saveSyncInProgress =
-			g_coopSaveSyncInProgress.load(std::memory_order_acquire);
-		const int saveSyncProgress =
-			g_coopSaveSyncProgress.load(std::memory_order_acquire);
-		std::string saveSyncStatus;
-		{
-			std::lock_guard<std::mutex> lock(g_coopSaveSyncMutex);
-			saveSyncStatus = g_coopSaveSyncStatus;
-		}
 
         if (peerMap.size() > 38)
             peerMap = peerMap.substr(0, 35) + "...";
@@ -1254,7 +1326,7 @@ namespace AchievementOverlay
         const ImGuiIO& io = ImGui::GetIO();
         const ImVec2 panelSize(
             352.0f * scale,
-            (hostRole ? 130.0f : 216.0f) * scale);
+            (hostRole ? 130.0f : 178.0f) * scale);
         const ImVec2 panelMinimum(
             18.0f * scale,
             io.DisplaySize.y - panelSize.y - 18.0f * scale);
@@ -1307,7 +1379,7 @@ namespace AchievementOverlay
         {
             const ImVec2 buttonMinimum(
                 left,
-                panelMaximum.y - 83.0f * scale);
+                panelMaximum.y - 45.0f * scale);
             const ImVec2 buttonSize(
                 panelSize.x - 32.0f * scale,
                 29.0f * scale);
@@ -1373,61 +1445,8 @@ namespace AchievementOverlay
                         true, std::memory_order_release);
                 }
 
-				const ImVec2 syncMinimum(
-					left, panelMaximum.y - 45.0f * scale);
-				const ImVec2 syncMaximum(
-					syncMinimum.x + buttonSize.x,
-					syncMinimum.y + buttonSize.y);
-				ImGui::SetCursorScreenPos(syncMinimum);
-				const bool syncClicked = ImGui::InvisibleButton(
-					"##alicecoop_sync_host_save", buttonSize);
-				const bool syncActive = ImGui::IsItemActive();
-				const bool syncHovered = ImGui::IsItemHovered();
-				const bool syncEnabled = saveSyncAvailable
-					&& !saveSyncInProgress;
-				const ImU32 syncFill = !syncEnabled
-					? IM_COL32(57, 53, 63, 245)
-					: (syncActive
-						? IM_COL32(255, 134, 108, 255)
-						: (syncHovered
-							? IM_COL32(255, 159, 129, 255)
-							: IM_COL32(229, 112, 91, 255)));
-				drawList->AddRectFilled(
-					syncMinimum, syncMaximum,
-					syncFill, 5.0f * scale);
-				drawList->AddRect(
-					syncMinimum, syncMaximum,
-					IM_COL32(32, 18, 15, 255),
-					5.0f * scale, 0, 1.5f * scale);
-				std::string syncLabel;
-				if (saveSyncInProgress)
-					syncLabel = "RECEIVING HOST SAVE... "
-						+ std::to_string(saveSyncProgress) + "%";
-				else if (!saveSyncStatus.empty())
-					syncLabel = saveSyncStatus;
-				else if (syncEnabled)
-					syncLabel = "Press \"K\" | SYNC HOST SAVE (OVERWRITES PROFILE)";
-				else
-					syncLabel = "HOST SAVE SYNC UNAVAILABLE";
-				if (syncLabel.size() > 46)
-					syncLabel = syncLabel.substr(0, 43) + "...";
-				const ImVec2 syncTextSize =
-					ImGui::CalcTextSize(syncLabel.c_str());
-				drawList->AddText(
-					ImVec2(
-						syncMinimum.x
-							+ (buttonSize.x - syncTextSize.x) * 0.5f,
-						syncMinimum.y
-							+ (buttonSize.y - syncTextSize.y) * 0.5f),
-					syncEnabled
-						? IM_COL32(27, 13, 10, 255)
-						: IM_COL32(194, 188, 201, 255),
-					syncLabel.c_str());
-				if (syncClicked && syncEnabled)
-				{
-					g_coopSaveSyncWarningVisible.store(
-						true, std::memory_order_release);
-				}
+				// The host-save overwrite (K) was removed: client progress is
+				// kept in its own saves and mirrored back instead.
             }
             ImGui::End();
         }
@@ -1592,15 +1611,16 @@ namespace AchievementOverlay
         if (!IsSoloMinigameWarningVisible())
             return;
 
-        LoadSoloMinigameTexture(pDevice);
+        // No aliceSoloLevel icon any more (removed from the mod): text only.
+        (void)pDevice;
         const float scale = g_uiScale;
         const char* heading = "SOLO MINIGAME";
         const char* message =
             "This section is played separately - share your score with your friend!";
         const ImVec2 headingSize = ImGui::CalcTextSize(heading);
         const ImVec2 messageSize = ImGui::CalcTextSize(message);
-        const float iconSize = 72.0f * scale;
-        const float iconGap = 14.0f * scale;
+        const float iconSize = 0.0f;
+        const float iconGap = 0.0f;
         const float paddingX = 18.0f * scale;
         const float paddingY = 13.0f * scale;
         const float gap = 6.0f * scale;
@@ -1636,23 +1656,6 @@ namespace AchievementOverlay
         const ImVec2 iconMaximum(
             iconMinimum.x + iconSize,
             iconMinimum.y + iconSize);
-        if (g_soloMinigameTexture.tex)
-        {
-            drawList->AddImage(
-                (ImTextureID)(uintptr_t)
-                    g_soloMinigameTexture.tex,
-                iconMinimum, iconMaximum);
-        }
-        else
-        {
-            drawList->AddCircle(
-                ImVec2(
-                    iconMinimum.x + iconSize * 0.5f,
-                    iconMinimum.y + iconSize * 0.5f),
-                iconSize * 0.35f,
-                IM_COL32(255, 210, 105, 255),
-                24, 2.0f * scale);
-        }
         const float textX =
             iconMaximum.x + iconGap;
         const float textY =
@@ -1666,282 +1669,6 @@ namespace AchievementOverlay
                 textX, textY + headingSize.y + gap),
             IM_COL32(242, 241, 237, 250),
             message);
-    }
-
-    inline void DrawAchievementsWindow(IDirect3DDevice9* pDevice)
-    {
-        ImGuiIO& io = ImGui::GetIO();
-        ImVec2 disp = io.DisplaySize;
-
-        ImVec2 winSize(disp.x * 0.6f, disp.y * 0.8f);
-        winSize.x = winSize.x < 700.0f ? 700.0f : (winSize.x > disp.x - 40.0f ? disp.x - 40.0f : winSize.x);
-        winSize.y = winSize.y < 500.0f ? 500.0f : (winSize.y > disp.y - 40.0f ? disp.y - 40.0f : winSize.y);
-
-        bool resChanged = ((int)disp.x != g_lastDispW) || ((int)disp.y != g_lastDispH);
-        g_lastDispW = (int)disp.x;
-        g_lastDispH = (int)disp.y;
-
-        ImGuiCond sizeCond = resChanged ? ImGuiCond_Always : ImGuiCond_FirstUseEver;
-        ImGui::SetNextWindowSize(winSize, sizeCond);
-        ImGui::SetNextWindowPos(ImVec2(disp.x * 0.5f, disp.y * 0.5f), sizeCond, ImVec2(0.5f, 0.5f));
-
-        float axis = GetControllerScrollAxis();
-        float wheel = ImGui::GetIO().MouseWheel;
-
-        if (g_restoreScroll)
-        {
-            ImGui::SetNextWindowScroll(ImVec2(-1.0f, g_savedScrollY));
-        }
-
-        if (ImGui::Begin("Achievements", &g_visible))
-        {
-            static bool s_secretPrev = false;
-            bool secretNow = g_padConnected && (g_padState.Gamepad.wButtons & XINPUT_GAMEPAD_A);
-
-            if (secretNow && !s_secretPrev)
-            {
-                g_showSecrets = !g_showSecrets;
-            }
-
-            s_secretPrev = secretNow;
-
-            if (g_restoreScroll)
-            {
-                float wanted = g_savedScrollY;
-                float maxY = ImGui::GetScrollMaxY();
-                if (wanted > maxY) wanted = maxY;
-
-                float diff = ImGui::GetScrollY() - wanted;
-                if (diff < 0.0f) diff = -diff;
-
-                if (diff < 0.5f || axis > 0.5f || axis < -0.5f || wheel != 0.0f || ++g_restoreScrollFrames > 10)
-                {
-                    g_restoreScroll = false;
-                    g_restoreScrollFrames = 0;
-                }
-            }
-            else if (axis != 0.0f)
-            {
-                float delta = axis * 1500.0f * g_uiScale * ImGui::GetIO().DeltaTime;
-                ImGui::SetScrollY(ImGui::GetScrollY() - delta);
-            }
-
-            ImGui::Checkbox("Show secret achievements", &g_showSecrets);
-            ImGui::Separator();
-
-            const float iconSize = 64.0f * g_uiScale;
-
-            std::vector<bool> unlockedSnapshot;
-            std::vector<int> currentSnapshot;
-            std::unordered_map<int, int> maxSnapshot;
-            {
-                std::lock_guard<std::recursive_mutex> lock(g_stateMutex);
-                unlockedSnapshot = g_unlocked;
-                currentSnapshot = g_current;
-                maxSnapshot = g_maxOverride;
-            }
-
-            for (size_t i = 0; i < g_achievements.size(); i++)
-            {
-                ImGui::PushID((int)i);
-
-                const Texture& t = g_achievements[i];
-                bool unlocked = (i < unlockedSnapshot.size()) ? unlockedSnapshot[i] : false;
-                int maxv = AchievementMaxFrom(maxSnapshot, (int)i);
-                int cur = (i < currentSnapshot.size()) ? currentSnapshot[i] : 0;
-
-                bool reveal = !IsSecret((int)i) || g_showSecrets || unlocked;
-
-                ImVec4 tint = unlocked ? ImVec4(1, 1, 1, 1) : ImVec4(0.35f, 0.35f, 0.35f, 1.0f);
-
-                if (reveal && t.tex)
-                {
-                    ImGui::ImageWithBg((ImTextureID)(uintptr_t)t.tex, ImVec2(iconSize, iconSize), ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), tint);
-                }
-                else
-                {
-                    // Hidden placeholder box with a centered "?"
-                    ImVec2 p = ImGui::GetCursorScreenPos();
-                    ImVec2 p2(p.x + iconSize, p.y + iconSize);
-                    ImDrawList* dl = ImGui::GetWindowDrawList();
-                    dl->AddRectFilled(p, p2, IM_COL32(90, 90, 90, 255), 4.0f);
-                    dl->AddRectFilled(ImVec2(p.x + 1, p.y + 1), ImVec2(p2.x - 1, p2.y - 1), IM_COL32(35, 35, 35, 255), 4.0f);
-                    ImVec2 ts = ImGui::CalcTextSize("?");
-                    dl->AddText(ImVec2(p.x + (iconSize - ts.x) * 0.5f, p.y + (iconSize - ts.y) * 0.5f), IM_COL32(170, 170, 170, 255), "?");
-                    ImGui::Dummy(ImVec2(iconSize, iconSize));
-                }
-
-                ImGui::SameLine();
-                ImGui::BeginGroup();
-
-                const char* name = "???";
-                const char* desc = "Hidden achievement";
-                if (reveal)
-                {
-                    name = (i < g_text.size()) ? g_text[i].name.c_str() : "???";
-                    desc = (i < g_text.size()) ? g_text[i].desc.c_str() : "";
-                }
-
-                ImVec4 nameCol = unlocked ? ImVec4(1.0f, 0.84f, 0.40f, 1.0f) : ImVec4(0.85f, 0.85f, 0.85f, 1.0f);
-                ImGui::TextColored(nameCol, "%s", name);
-
-                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
-                ImGui::TextWrapped("%s", desc);
-                ImGui::PopTextWrapPos();
-
-                char overlay[32];
-                float barFrac;
-                if (!reveal)
-                {
-                    // Hidden achievement: don't reveal any progress
-                    barFrac = 0.0f;
-                    snprintf(overlay, sizeof(overlay), "???");
-                }
-                else
-                {
-                    // Counter-backed achievements show their stored value; binary ones use the unlock flag
-                    bool hasCounter = maxv > 1;
-                    int displayCur = hasCounter ? cur : (unlocked ? 1 : 0);
-                    barFrac = maxv > 0 ? (float)displayCur / (float)maxv : (unlocked ? 1.0f : 0.0f);
-                    if (barFrac > 1.0f) barFrac = 1.0f;
-                    snprintf(overlay, sizeof(overlay), "%d/%d", displayCur, maxv);
-                }
-
-                // Draw the bar without its built-in overlay, then place the counter at the top-left
-                ImVec2 barPos = ImGui::GetCursorScreenPos();
-                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.22f, 0.60f, 0.85f, 1.0f));
-                ImGui::ProgressBar(barFrac, ImVec2(-FLT_MIN, 0.0f), "");
-                ImGui::PopStyleColor();
-
-                ImVec2 ots = ImGui::CalcTextSize(overlay);
-                float barH = ImGui::GetFrameHeight();
-                ImGui::GetWindowDrawList()->AddText(ImVec2(barPos.x + 6.0f * g_uiScale, barPos.y + (barH - ots.y) * 0.5f), IM_COL32(255, 255, 255, 255), overlay);
-
-                ImGui::EndGroup();
-                ImGui::PopID();
-
-                ImGui::Separator();
-            }
-
-            if (!g_restoreScroll)
-            {
-                g_savedScrollY = ImGui::GetScrollY();
-            }
-        }
-
-        ImGui::End();
-    }
-
-    inline void DrawUnlockToast()
-    {
-        std::lock_guard<std::mutex> lock(g_toastMutex);
-
-        if (g_toasts.empty()) return;
-
-        const float kSlideMs = 350.0f;
-        const float kHoldMs = 5500.0f;
-        const float kTotalMs = 6200.0f;
-
-        unsigned long long now = GetTickCount64();
-
-        for (size_t i = 0; i < g_toasts.size(); )
-        {
-            if ((float)(now - g_toasts[i].start) >= kTotalMs)
-            {
-                g_toasts.erase(g_toasts.begin() + i);
-            }
-            else
-            {
-                i++;
-            }
-        }
-
-        if (g_toasts.empty()) return;
-
-        ImGuiIO& io = ImGui::GetIO();
-        float scale = g_uiScale;
-        float toastW = 420.0f * scale;
-        float margin = 20.0f * scale;
-        float spacing = 8.0f * scale;
-        float onX = io.DisplaySize.x - toastW - margin;
-        float offX = io.DisplaySize.x + 10.0f;
-
-        ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoInputs;
-
-        float targetY = margin;
-        for (ToastItem& it : g_toasts)
-        {
-            float t = (float)(now - it.start);
-
-            float x, alpha;
-            if (t < kSlideMs)
-            {
-                float k = t / kSlideMs;
-                k = 1.0f - (1.0f - k) * (1.0f - k); // ease-out
-                x = offX + (onX - offX) * k;
-                alpha = k;
-            }
-            else if (t < kHoldMs)
-            {
-                x = onX;
-                alpha = 1.0f;
-            }
-            else
-            {
-                float k = (t - kHoldMs) / (kTotalMs - kHoldMs);
-                x = onX + (offX - onX) * (k * k); // ease-in
-                alpha = 1.0f - k;
-            }
-
-            // Ease the vertical slot so cards slide up when one above expires
-            if (!it.placed)
-            {
-                it.animY = targetY; it.placed = true;
-            }
-            else
-            {
-                it.animY += (targetY - it.animY) * 0.25f;
-            }
-
-            ImGui::SetNextWindowPos(ImVec2(x, it.animY));
-            ImGui::SetNextWindowSize(ImVec2(toastW, 0.0f));
-
-            char wname[32];
-            snprintf(wname, sizeof(wname), "##toast_%u", it.uid);
-
-            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
-            if (ImGui::Begin(wname, nullptr, flags))
-            {
-                int id = it.achvId;
-                float iconSize = 64.0f * scale;
-
-                if (id >= 0 && id < (int)g_achievements.size() && g_achievements[id].tex)
-                {
-                    ImGui::ImageWithBg((ImTextureID)(uintptr_t)g_achievements[id].tex, ImVec2(iconSize, iconSize), ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), ImVec4(1, 1, 1, 1));
-                    ImGui::SameLine();
-                }
-
-                ImGui::BeginGroup();
-                ImGui::TextColored(ImVec4(1.0f, 0.84f, 0.40f, 1.0f), "Achievement Unlocked");
-                const char* name = (id >= 0 && id < (int)g_text.size()) ? g_text[id].name.c_str() : "";
-                const char* desc = (id >= 0 && id < (int)g_text.size()) ? g_text[id].desc.c_str() : "";
-                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
-                ImGui::TextWrapped("%s", name);
-                if (desc[0])
-                {
-                    ImGui::TextColored(ImVec4(0.78f, 0.78f, 0.78f, 1.0f), "%s", desc);
-                }
-
-                ImGui::PopTextWrapPos();
-                ImGui::EndGroup();
-            }
-
-            it.height = ImGui::GetWindowHeight();
-            ImGui::End();
-            ImGui::PopStyleVar();
-
-            targetY += (it.height > 1.0f ? it.height : 90.0f * scale) + spacing;
-        }
     }
 
     // The Win32 backend forces a hardware cursor while the overlay is up, which is wrong when playing
@@ -2003,28 +1730,48 @@ namespace AchievementOverlay
             ImGui::GetBackgroundDrawList()->AddCallback(setNearest, nullptr);
         }
 
+        // Trailer camera (N): no mod indicators either, only the game view
+        // (the AliceCoop menu itself still opens with M).
+        const bool trailerClean = AliceCoop::IsTrailerHudHidden();
+        if (!trailerClean)
+        {
         DrawPeerCutsceneIndicator(pDevice);
-        DrawCoopWaitIndicator(pDevice);
+        DrawSpectateIndicator(pDevice);
+        // readycheck4: the "waiting for the other player" window is gone -
+        // the ready label is the game's own HUD prompt.
         DrawSoloMinigameWarning(pDevice);
-        DrawCoopMainMenuPanel();
-		DrawCoopPauseMenuPanel();
-		DrawCoopSaveSyncWarning();
+        // DrawCoopMainMenuPanel() (the "ALICE COOP" branded panel with the
+        // Join Host button) has been replaced by DrawAliceCoopIndicatorIcon
+        // below — a small blinking icon + key hint instead of a full status
+        // panel, per this project's own design.
+        DrawAliceCoopIndicatorIcon(pDevice);
+        }
+        // DrawCoopPauseMenuPanel() (the "ALICE COOP" pause-screen panel with
+        // P/O/L teleport hints and the movement-trails checkbox) is also no
+        // longer drawn, for the same reason as the main-menu panel above.
+        // The underlying hotkeys (P/O/L/T/K) themselves are handled
+        // elsewhere and keep working — only this on-screen reminder panel
+        // is gone.
+		// DrawCoopSaveSyncWarning(): the host-save overwrite was removed.
+        DrawAliceCoopMenu(pDevice);
 
-        if (g_visible || IsCoopWaitInteractive()
+        // menucursor1: the window draws its own cursor while it is open (the
+        // game hides the system one), and never hides it for idleness.
+        if (g_aliceCoopMenuVisible)
+        {
+            g_lastMouseInputTick = GetTickCount64();
+        }
+        else if (g_visible || IsCoopWaitInteractive()
             || g_coopMenuHovered.load(std::memory_order_acquire)
 			|| g_coopPauseHovered.load(std::memory_order_acquire)
 			|| g_coopSaveSyncWarningVisible.load(std::memory_order_acquire))
         {
             UpdateOverlayCursor();
-            if (g_visible)
-                DrawAchievementsWindow(pDevice);
         }
         else
         {
             g_lastMouseInputTick = 0;
         }
-
-        DrawUnlockToast();
 
         ImGui::EndFrame();
         ImGui::Render();
@@ -2039,6 +1786,41 @@ namespace AchievementOverlay
 
     inline LRESULT CALLBACK WndProc_Hook(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     {
+        // Shared tutorial boards: the host's own keys from the other game,
+        // posted by the co-op module, pass untouched.
+        if ((msg == WM_KEYDOWN || msg == WM_KEYUP) && wParam < 256
+            && g_coopBoardInjectPending[wParam].load(std::memory_order_acquire) > 0)
+        {
+            g_coopBoardInjectPending[wParam].fetch_sub(1, std::memory_order_acq_rel);
+            return CallWindowProc(g_oWndProc, hWnd, msg, wParam, lParam);
+        }
+        if ((msg == WM_KEYDOWN || msg == WM_KEYUP)
+            && g_coopBoardInputCapture.load(std::memory_order_acquire)
+            && wParam != VK_ESCAPE && wParam != 'M'
+            && !(wParam >= VK_F1 && wParam <= VK_F24))
+        {
+            // Host: this key turns the page here, and on the client too.
+            std::lock_guard lock(g_coopBoardKeyMutex);
+            if (g_coopBoardKeys.size() < 64)
+                g_coopBoardKeys.push_back(CoopBoardKey{
+                    static_cast<unsigned int>(wParam),
+                    static_cast<long>(lParam), msg == WM_KEYDOWN });
+        }
+        if (g_coopBoardInputBlocked.load(std::memory_order_acquire))
+        {
+            // Client: the host turns the pages; releases still pass so no
+            // key stays held in the game.
+            switch (msg)
+            {
+                case WM_KEYDOWN: case WM_CHAR:
+                case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK:
+                case WM_RBUTTONDOWN: case WM_RBUTTONDBLCLK:
+                case WM_MBUTTONDOWN: case WM_MBUTTONDBLCLK:
+                case WM_MOUSEWHEEL: case WM_MOUSEHWHEEL:
+                    return 0;
+                default: break;
+            }
+        }
         const bool coopMenuVisible =
             g_coopMenuVisible.load(std::memory_order_acquire);
         const bool coopMenuHovered =
@@ -2048,7 +1830,7 @@ namespace AchievementOverlay
 		const bool coopPauseHovered =
 			g_coopPauseHovered.load(std::memory_order_acquire);
         const bool captureInput =
-            g_visible || IsCoopWaitInteractive()
+            g_visible || g_aliceCoopMenuVisible || IsCoopWaitInteractive()
 			|| coopMenuHovered || coopPauseHovered
 			|| g_coopSaveSyncWarningVisible.load(
 				std::memory_order_acquire);
@@ -2057,6 +1839,8 @@ namespace AchievementOverlay
             && !g_deviceLost)
         {
             ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
+            // menucursor1: M itself still reaches nothing else; Escape and
+            // the other keys go to the window while it is open.
 
             if (kBlockGameInputWhileVisible && captureInput)
             {
@@ -2308,17 +2092,6 @@ namespace AchievementOverlay
             std::memory_order_acq_rel);
     }
 
-    inline void FeedControllerState(const XINPUT_STATE& state, bool connected)
-    {
-        g_padState = state;
-        g_padConnected = connected;
-    }
-
-    inline bool WantCaptureController()
-    {
-        return kBlockGameInputWhileVisible && g_imguiInitialized && g_visible && !g_deviceLost;
-    }
-
     inline void OnPresent(IDirect3DDevice9* pDevice)
     {
         if (!pDevice)
@@ -2336,15 +2109,13 @@ namespace AchievementOverlay
 
         if (g_imguiInitialized && pDevice != g_pInitializedDevice)
         {
-            ReleaseAchievements();
             ReleaseCutsceneWatchTexture();
             ShutdownImGui();
         }
 
         else if (g_imguiInitialized && g_pendingScale > 0.0f && ((g_pendingScale > g_uiScale ? g_pendingScale - g_uiScale : g_uiScale - g_pendingScale) > 0.01f))
         {
-            ReleaseAchievements(); // resolution changed: reload icons and re-bake the font
-            ReleaseCutsceneWatchTexture();
+            ReleaseCutsceneWatchTexture(); // resolution changed: reload icons and re-bake the font
             ShutdownImGui();
         }
 
@@ -2353,14 +2124,8 @@ namespace AchievementOverlay
             InitImGui(pDevice);
         }
 
-        if (g_imguiInitialized && AchievementSupport)
-        {
-            LoadAchievements(pDevice);
-            LoadText();
-        }
-
         if (!g_imguiInitialized
-            || (!g_visible && g_toasts.empty()
+            || (!g_visible
                 && !g_peerWatchingCutscene.load(
                     std::memory_order_acquire)
                 && !g_coopWaitingForPeer.load(
@@ -2371,11 +2136,15 @@ namespace AchievementOverlay
 				&& !g_coopPauseVisible.load(
 					std::memory_order_acquire)
 				&& !g_coopSaveSyncWarningVisible.load(
-					std::memory_order_acquire)))
+					std::memory_order_acquire)
+                // watchicon1 (10.11): the watch_X icon was drawn only when some
+                // other overlay was up (the pause menu); watching is enough now
+                && !AliceCoop::IsSpectatingHost()
+                && !AliceCoop::IsWatchingPuzzle()))
             return;
 
         ImGui::GetIO().MouseDrawCursor =
-            g_visible || IsCoopWaitInteractive()
+            g_visible || g_aliceCoopMenuVisible || IsCoopWaitInteractive()
 			|| g_coopPauseVisible.load(std::memory_order_acquire)
 			|| g_coopSaveSyncWarningVisible.load(
 				std::memory_order_acquire);
@@ -2475,13 +2244,7 @@ namespace AchievementOverlay
 
     inline void Toggle()
     {
-        g_visible = !g_visible;
-
-        if (g_visible)
-        {
-            g_restoreScroll = true;
-            g_restoreScrollFrames = 0;
-        }
+        // Achievements window removed: nothing to toggle.
     }
 
     inline void Update(IDirect3DDevice9* pDevice)
@@ -2495,9 +2258,24 @@ namespace AchievementOverlay
 
         PollCoopContextShortcut();
 
-        if (GetAsyncKeyState(VK_HOME) & 1)
+        // menucursor1 (07.11 request): M opens the AliceFracturedMinds window
+        // only on the main menu or the pause menu (where the "M" icon is),
+        // and while it is open the mouse cursor is shown and the window takes
+        // the mouse and keyboard, so the IP / port can be edited. M again (or
+        // leaving the menu / resuming the game) closes it and gives the
+        // input back to the game.
+        const bool inMenu = g_coopMenuVisible.load(std::memory_order_acquire)
+            || g_coopPauseVisible.load(std::memory_order_acquire);
+        if (GetAsyncKeyState('M') & 1)
         {
-            Toggle();
+            if (g_aliceCoopMenuVisible)
+                g_aliceCoopMenuVisible = false;
+            else if (inMenu)
+                g_aliceCoopMenuVisible = true;
         }
+        if (g_aliceCoopMenuVisible && !inMenu)
+            g_aliceCoopMenuVisible = false;
+        if (g_aliceCoopMenuVisible)
+            ClipCursor(nullptr);
     }
 }

@@ -38,8 +38,10 @@ install-manifest.json
 package-manifest.json
 
 # Local launch overrides
-manual-launch/AliceCoop-LaunchConfig.local.bat
 manual-launch/RUN_*_IP.bat
+
+# Visual Studio upgrade reports
+UpgradeLog*.htm
 
 # Editors and operating systems
 .vscode/

@@ -7,6 +7,9 @@
 // Fixes
 inline bool FixHighFPSHairPhysics = false;
 inline bool FixHighFPSClothPhysics = false;
+// Co-op diagnostic: module-relative address just after the game's own call to
+// the cloth solver, taken from CLOTHSOLVERTRACE. 0 disables the probe.
+inline int CoopClothDriverRva = 0;
 inline bool FixHighFPSProjectileCollisionCheck = false;
 inline bool FixHighFPSPhysX = false;
 inline bool FixHighFPSWalkingPhysics = false;
@@ -37,7 +40,6 @@ inline bool SkipSHIntro = false;
 inline bool SkipUEIntro = false;
 inline bool EnableCrashHandler = false;
 inline bool ShowProfileCreation = false;
-inline bool AchievementSupport = false;
 inline bool EnableConsole = false;
 
 // Display
@@ -75,6 +77,7 @@ inline void ReadConfig()
 	// Fixes
 	FixHighFPSHairPhysics = IniHelper::ReadInteger("Fixes", "FixHighFPSHairPhysics", 1) == 1;
 	FixHighFPSClothPhysics = IniHelper::ReadInteger("Fixes", "FixHighFPSClothPhysics", 1) == 1;
+	CoopClothDriverRva = IniHelper::ReadInteger("Debug", "CoopClothDriverRva", 0);
 	FixHighFPSProjectileCollisionCheck = IniHelper::ReadInteger("Fixes", "FixHighFPSProjectileCollisionCheck", 1) == 1;
 	FixHighFPSPhysX = IniHelper::ReadInteger("Fixes", "FixHighFPSPhysX", 1) == 1;
 	FixHighFPSWalkingPhysics = IniHelper::ReadInteger("Fixes", "FixHighFPSWalkingPhysics", 1) == 1;
@@ -97,12 +100,35 @@ inline void ReadConfig()
 	MaxPoolThreads = IniHelper::ReadInteger("Fixes", "MaxPoolThreads", 8);
 
 	// General
-	AchievementSupport = IniHelper::ReadInteger("General", "AchievementSupport", 1) == 1;
 	UnlockCompleteEditionDLC = IniHelper::ReadInteger("General", "UnlockCompleteEditionDLC", 1) == 1;
 	ShowProfileCreation = IniHelper::ReadInteger("General", "ShowProfileCreation", 1) == 1;
 	WarnAlice1InstallFolder = IniHelper::ReadInteger("General", "WarnAlice1InstallFolder", 1) == 1;
 	HideAlice1WhenMissing = IniHelper::ReadInteger("General", "HideAlice1WhenMissing", 1) == 1;
 	EnableConsole = IniHelper::ReadInteger("General", "EnableConsole", 1) == 1;
+	// gameconsole1 (12.11 request): the game console (F2) can also be
+	// switched off in AliceCoop.ini - [General] GameConsole=0. Without that
+	// key the setting above stays as it is.
+	{
+		HMODULE self = nullptr;
+		wchar_t modulePath[MAX_PATH] = {};
+		if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+				| GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCWSTR>(&ReadConfig), &self)
+			&& GetModuleFileNameW(self, modulePath, MAX_PATH) > 0)
+		{
+			wchar_t* slash = wcsrchr(modulePath, L'\\');
+			if (slash)
+				*(slash + 1) = L'\0';
+			wchar_t coopIni[MAX_PATH] = {};
+			if (wcscpy_s(coopIni, modulePath) == 0
+				&& wcscat_s(coopIni, L"AliceCoop\\AliceCoop.ini") == 0)
+			{
+				const UINT value = GetPrivateProfileIntW(L"General", L"GameConsole", 2, coopIni);
+				if (value == 0 || value == 1)
+					EnableConsole = value == 1;
+			}
+		}
+	}
 	EnableCrashHandler = IniHelper::ReadInteger("General", "EnableCrashHandler", 1) == 1;
 	SkipEAIntro = IniHelper::ReadInteger("General", "SkipEAIntro", 0) == 1;
 	SkipSHIntro = IniHelper::ReadInteger("General", "SkipSHIntro", 1) == 1;

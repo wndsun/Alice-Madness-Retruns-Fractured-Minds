@@ -18,8 +18,6 @@ void ApplyXAudio2Upgrade();
 // General
 void ApplyIntroSkip();
 void ApplyWarnAlice1InstallFolder();
-void ApplyAchievementSupport();
-void UpdateAchievementProgress();
 
 // Display
 void ApplyFontScaling();
@@ -64,4 +62,3 @@ namespace CutsceneFPSCap
 }
 namespace InputResponsiveness { void Tick(); }
 namespace BlackBarGuard { void Tick(); }
-namespace BlockCameraInMenu { void Tick(); }

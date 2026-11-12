@@ -10,12 +10,6 @@ static void OnCheckAutoResolution(safetyhook::Context& ctx)
 
 	if (docPath)
 	{
-		// Cache the documents path so the achievement save file can be located later
-		if (AchievementSupport)
-		{
-			g_docPath = docPath;
-		}
-
 		if (AutoResolution)
 		{
 			std::filesystem::path iniPath = std::filesystem::path(docPath) / L"AliceGame" / L"Config" / L"AliceEngine.ini";
@@ -40,12 +34,8 @@ static void OnApplyAutoResolution(safetyhook::Context& ctx)
 
 void ApplyAutoResolution()
 {
-	if (!AutoResolution && !AchievementSupport) return;
+	if (!AutoResolution) return;
 
 	checkAutoResolution = safetyhook::create_mid(GetAddress(Addr::DocPath), OnCheckAutoResolution);
-
-	if (AutoResolution)
-	{
-		applyAutoResolution = safetyhook::create_mid(GetAddress(Addr::ApplyAutoResolution), OnApplyAutoResolution);
-	}
+	applyAutoResolution = safetyhook::create_mid(GetAddress(Addr::ApplyAutoResolution), OnApplyAutoResolution);
 }

@@ -1,5 +1,8 @@
 #include "Common.hpp"
 #include "Features.hpp"
+#include "Coop/CoopClient.hpp"
+
+#include <intrin.h>
 
 static SafetyHookInline RangeAttackPawnCollisionCheck{};
 
@@ -458,6 +461,11 @@ static void __fastcall HairSimulator_Hook(void* thisPtr, int, float delta)
 	frameTimeScale = TARGET_FRAME_TIME / delta;
 	savedHairDeltaTime = delta;
 
+	// Same trick that found the cloth driver: the return address here is inside
+	// whatever calls the hair solver each frame, and that caller is the routine
+	// the proxy's hair needs.
+	AliceCoop::TraceHairSolverCall(thisPtr, _ReturnAddress());
+
 	HairSimulator.unsafe_thiscall<void>(thisPtr, delta);
 }
 
@@ -549,6 +557,11 @@ static uint32_t __fastcall ClothSimulator_Hook(void* thisPtr, int, float delta)
 {
 	uint8_t* cloth = (uint8_t*)thisPtr;
 	int numParticles = *(int*)(cloth + 0xB8);
+
+	// Co-op diagnostic: record which solver instances the game steps by itself
+	// and, more importantly, the return address of whoever calls it. That caller
+	// is the per-frame cloth update we need for the proxy's dress.
+	AliceCoop::TraceClothSolverCall(thisPtr, _ReturnAddress(), numParticles);
 	uint8_t* particles = *(uint8_t**)(cloth + 0xC4);
 
 	if (!particles || numParticles <= 0)
@@ -715,11 +728,30 @@ static uint32_t __fastcall ClothSimulator_Hook(void* thisPtr, int, float delta)
 	return result;
 }
 
+static safetyhook::MidHook coopClothDriverProbe{};
+
+// CLOTHSOLVERTRACE proved the game's driver at this address only ever steps the
+// playable Alice's three cloth instances, never the proxy's. Sitting on the
+// instruction right after that call lets us see what the driver is holding -
+// one of these registers is how it reached the cloth, and that is what we need
+// in order to point it at the proxy as well.
+static void OnCoopClothDriverStep(safetyhook::Context& ctx)
+{
+	AliceCoop::TraceClothDriverRegisters(ctx.eax, ctx.ecx, ctx.edx, ctx.ebx, ctx.esi, ctx.edi, ctx.ebp);
+}
+
 void ApplyFixHighFPSClothPhysics()
 {
 	if (!FixHighFPSClothPhysics) return;
 
 	ClothSimulator = HookHelper::CreateHook((void*)GetAddress(Addr::ClothSimulator), &ClothSimulator_Hook);
+
+	const uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+	if (CoopClothDriverRva != 0)
+	{
+		coopClothDriverProbe = safetyhook::create_mid(moduleBase + static_cast<uintptr_t>(CoopClothDriverRva), OnCoopClothDriverStep);
+	}
+	AliceCoop::ReportClothDriverProbe(static_cast<uintptr_t>(CoopClothDriverRva), moduleBase, coopClothDriverProbe ? true : false);
 }
 
 // ---- Walking ----

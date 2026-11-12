@@ -67,7 +67,6 @@ static void Init()
 	// General
 	ApplyIntroSkip();
 	ApplyWarnAlice1InstallFolder();
-	ApplyAchievementSupport();
 
 	// Display
 	ApplyFontScaling();

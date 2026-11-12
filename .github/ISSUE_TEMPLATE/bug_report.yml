@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible Alice Co-op problem
+description: Report a reproducible AliceFracturedMinds problem
 title: "[Bug]: "
 labels: [bug]
 body:
@@ -9,8 +9,8 @@ body:
   - type: input
     id: version
     attributes:
-      label: Alice Co-op version
-      placeholder: 0.1.0-alpha.1 / protocol 29
+      label: AliceFracturedMinds version
+      placeholder: 1.0.0
     validations:
       required: true
   - type: dropdown
@@ -43,7 +43,7 @@ body:
     id: recovery
     attributes:
       label: Recovery attempted
-      description: Mention P/O, forced cutscene, checkpoint restart, or reconnect.
+      description: Mention P/O teleport, L, checkpoint restart, or reconnect.
   - type: checkboxes
     id: checklist
     attributes:
@@ -53,3 +53,8 @@ body:
           required: true
         - label: Logs were reviewed and personal information was removed.
           required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and crash reports
+      description: Attach AliceCoop\logs\AliceCoop_host_*.log / AliceCoop_client_*.log and crash_*.txt from both players if you have them.

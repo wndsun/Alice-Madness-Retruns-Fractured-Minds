@@ -7,6 +7,11 @@
 namespace AliceCoopProtocol
 {
 	constexpr std::uint32_t Magic = 0x504F4341; // "ACOP" in little-endian byte order.
+	// Deliberately left at 29 even though a packet type was added. The relay
+	// server is built separately from its own copy of this header and checks
+	// this number on every datagram, so bumping it here quietly turns every
+	// packet into a malformed one until the relay is rebuilt too. The new type
+	// is purely additive - a build that does not know it simply ignores it.
 	constexpr std::uint16_t Version = 29;
 	constexpr std::uint16_t DefaultPort = 27018;
 	constexpr std::size_t MaxDatagramSize = 1024;
@@ -55,6 +60,22 @@ namespace AliceCoopProtocol
 		ClockBombUpdate = 3,
 		ClockBombExplode = 4,
 		ClockBombRemove = 5,
+		// Teapot Cannon shell. Same 68-byte payload: rotation[] carries the
+		// trace's DestLocation as float bits, extra its FlightTime, reserved
+		// the flight template hash, projectileId's high half the muzzle hash,
+		// variant = level | 0x80 when charged.
+		TeapotSpawn = 6,
+		// One-shot jump/float/glide emitter: reserved = template hash,
+		// location = offset from the pawn, rotation = emitter rotation.
+		BodyEffect = 7,
+		// Float (hold jump) emitter state: variant bit0 = on, reserved =
+		// template hash. Repeated every 250ms while on, 3x when it ends.
+		FloatState = 8,
+		// The shooter's pepper bullet / teapot shell ended (Destroyed):
+		// projectileId = the id its *Spawn event carried, variant 0 pepper /
+		// 1 teapot, location = where it ended. The receiver explodes its
+		// cosmetic copy right there, at that moment.
+		ProjectileImpact = 9,
 	};
 
 	enum class SharedWorldEventKind : std::uint8_t
@@ -70,6 +91,8 @@ namespace AliceCoopProtocol
 		InteractionContextActorStarted = 9,
 		BreakableDestroyed = 10,
 		PlayerDamageRequest = 11,
+		// Carries a hashed AnimNotify_PlayParticleEffect name in entityKey.
+		ParticleNotify = 12,
 	};
 
 	enum SharedWorldEventFlags : std::uint8_t
@@ -85,6 +108,15 @@ namespace AliceCoopProtocol
 		// client's native AI owns movement while pursuing the real client
 		// Alice. The client returns that pawn pose in ClientCommandPayload.
 		SharedEnemyPoseClientAuthority = 1u << 2,
+		// Bit 3: the shield bits below are valid (the enemy has shields).
+		// Bits 4..11: ShieldComponentsArray[i].bInShield for i < 8. Armour
+		// is toggled by animation notifies (AliceAnimNotify_ToggleShield),
+		// which do not run on a copy that only follows poses - the client's
+		// Menacing Ruin stayed armoured for good and only the host could
+		// ever hurt it.
+		SharedEnemyPoseShieldValid = 1u << 3,
+		SharedEnemyPoseShieldShift = 4,
+		SharedEnemyPoseShieldMask = 0xFFu << 4,
 		// Upper 16 bits carry a compact class signature. This lets a client
 		// recover a binding when a dynamically spawned enemy has a different
 		// initial position (and therefore a different stable entity key).
@@ -119,6 +151,12 @@ namespace AliceCoopProtocol
 		StateWeaponHidden = 1u << 15,
 		StateForceCutscene = 1u << 16,
 		StateProgressionValid = 1u << 17,
+		// The sender's Alice is in hysteria (bInHysteriaMode).
+		StateHysteria = 1u << 18,
+		// The sender's weapon is faded out (AlicePawn.FadeOutWeapon: dodge,
+		// idle put-away, weapon switch) - WeaponForAlice.bFadeToHide or its
+		// CurMeshComponent force-translucency heading to alpha 0.
+		StateWeaponFaded = 1u << 19,
 	};
 
 	enum HostCommandFlags : std::uint32_t
@@ -147,6 +185,14 @@ namespace AliceCoopProtocol
 		ShrinkEnter = 8,
 		ShrinkLeave = 9,
 		WeaponSwitch = 10,
+		// Fire button pressed/released with a chargeable weapon (the Teapot).
+		// StartFire only arrives with the actual shot, too late for the steam
+		// that rises while the charge builds.
+		ChargeStart = 11,
+		ChargeStop = 12,
+		// Alice reappeared at a checkpoint (AlicePlayerController.RespawnAlice
+		// or the SM_Respawn special move): play the respawn effect.
+		Respawn = 13,
 	};
 
 	enum class AnimationComponent : std::uint8_t
@@ -227,7 +273,15 @@ namespace AliceCoopProtocol
 		std::uint64_t clientTimeMs = 0;
 		std::uint8_t sequenceCount = 0;
 		std::uint8_t blendCount = 0;
-		std::uint8_t reserved[2]{};
+		// Was two reserved bytes; now a 16-bit hash of an
+		// AnimNotify_PlayParticleEffect to replay on the proxy, or zero for
+		// none. It has to live inside the existing two bytes because the relay
+		// validates each packet's payload size against its own copy of this
+		// header: growing this struct by even four bytes stopped type 9 being
+		// forwarded at all, which took the proxy's animation with it. Sixteen
+		// bits over a few hundred notify objects collides about once across
+		// the whole game, and the cost of a collision is one wrong spark.
+		std::uint16_t particleNotifyHash = 0;
 		AnimationSequencePayload sequences[MaxAnimationSequences]{};
 		AnimationBlendPayload blends[MaxAnimationBlends]{};
 	};

@@ -1,56 +1,49 @@
 # Configuration reference
 
-## Launch configuration
+## In-game menu (`M`)
 
-Edit `AliceCoop-LaunchConfig.bat` when launching the game through the supplied
-host/client BAT files.
+Role, server address and port. *Save* writes them to `AliceCoop.ini`; the
+address and port apply immediately, the role on the next game start. Saving as
+*Host* starts `AliceCoopServer.exe` hidden; saving as *Client* stops it.
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `SERVER_IP` | `127.0.0.1` | Address of the PC running the relay server |
-| `SERVER_BIND_IP` | `0.0.0.0` | Local interface used by the relay server |
-| `COOP_PORT` | `27018` | UDP port used by every participant |
-| `DISPLAY_MODE` | `fullscreen` | `fullscreen`, `windowed`, or `borderless` |
-| `WINDOW_WIDTH/HEIGHT` | `1920/1080` | Normal window or explicit borderless size |
-| `WINDOW_X/Y` | `0/0` | Normal window position |
-| `TEST_WINDOW_WIDTH/HEIGHT` | `1440/900` | Local two-window test size |
-| `TEST_BACKGROUND_DAMAGE_GUARD` | `1` | Prevents damage in the unfocused local test window |
+## AliceCoop.ini
 
-Host/client scripts also accept temporary overrides:
+`<game>\Binaries\Win32\AliceCoop\AliceCoop.ini`. The shipped values are the
+tested defaults - change only what you need.
+
+| Section | Key | Default | Description |
+| --- | --- | --- | --- |
+| `[Network]` | `EnableWithoutLauncher` | `1` | Co-op is active when the game starts normally |
+| | `Role` | `host` | `host` or `client` |
+| | `ServerAddress` | `127.0.0.1` | Address of the PC running the relay server |
+| | `Port` | `27018` | UDP port, the same for everyone |
+| `[VisualProxy]` | `Enabled` | `1` | Show the other player's Alice |
+| | `PreserveMovementTrails` | `0` | Cosmetic glide/jump particle history (`T` in the pause menu) |
+| `[SharedWorld]` | `EnemyHealth`, `EnemyTransforms` | `1` | Host-authoritative enemies |
+| `[Performance]` | `MaxFPS` | `60` | FPS limit (30-120) |
+| | `LowMemoryMode` | `1` | Lighter textures for two 32-bit game processes |
+| `[General]` | `GameConsole` | not set | `0` / `1` turns the F2 console off / on; not set = `EnableConsole` in `MadnessPatch.ini` |
+| `[Debug]` | `Logs` | `1` | `0` disables every file the mod writes |
+| | `DiagTrail` | `1` | Short action trail saved with a crash report |
+| | `Dumps` | `0` | Developer research dumps - keep `0` |
+| | `HairRecord`, `EnemyRecord` | `0` | Large developer recordings - keep `0` |
+
+`[Trace]` options are developer diagnostics; keep them all at `0`. The other
+`[VisualProxy]` and `[Debug]` keys are tuned values - leave them as shipped.
+
+## Launch scripts
+
+The scripts in `AliceCoop\` read `AliceCoop.ini` and accept optional
+overrides:
 
 ```text
-AliceCoop-Host.bat 127.0.0.1 27018
+AliceCoop-Host.bat
 AliceCoop-Client.bat 26.x.x.x 27018
 AliceCoop-Server.bat 0.0.0.0 27018
 ```
 
-## AliceCoop.ini
-
-Normal releases ship conservative defaults. The most relevant sections are:
-
-- `[Network]`: relay address, port, update rate and timeout fallback.
-- `[VisualProxy]`: interpolation, collision policy, hair alignment and optional
-  movement-trail history.
-- `[SharedWorld]`: enemy health/transform authority and reconciliation limits.
-- `[Window]`: legacy per-process window management; launch scripts normally
-  override it.
-- `[Performance]`: process FPS and worker-thread limits.
-- `[Trace]`: diagnostic logging. Leave every trace disabled for normal play.
-
-For a normal Steam launch, set `EnableWithoutLauncher = 1` and explicitly set
-`Role = host` or `Role = client`. Steam may relaunch the game from its existing
-client process, which discards the per-process environment supplied by the BAT
-files. Set `ServerAddress` to the relay PC's reachable LAN/VPN address, or to
-`127.0.0.1` when the relay runs on the same PC.
-
-Keep `EnableWithoutLauncher = 0` when using the supplied host/client BAT files;
-those scripts set the role and enable co-op separately for each process.
-
 ## MadnessPatch.ini
 
-The combined DLL reads the normal MadnessPatch configuration beside
-`AliceMadnessReturns.exe`. Alice Co-op does not require all optional graphics
-features to be enabled. Two simultaneous 32-bit game processes may benefit from
-lower texture pressure and a 60 FPS limit.
-
-Keep `CrashFixes`, high-FPS physics fixes, atomic saves and input fixes enabled.
+The combined DLL reads the normal MadnessPatch settings next to
+`AliceMadnessReturns.exe`. Keep `CrashFixes`, the high-FPS physics fixes, atomic
+saves and the input fixes enabled.

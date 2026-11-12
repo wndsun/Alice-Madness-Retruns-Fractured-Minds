@@ -2,43 +2,42 @@
 
 ## The game does not start
 
-- Confirm the mod is in the directory containing `AliceMadnessReturns.exe`.
-- Install Microsoft Visual C++ Redistributable 2015–2022 x86.
-- Remove unrelated `dinput8.dll` proxy mods temporarily; only one file with that
-  name can be loaded.
-- Restore the previous DLL with `AliceCoop\Uninstall-AliceCoop.bat` to confirm
-  whether the issue is mod-related.
+- The mod must be in the folder with `AliceMadnessReturns.exe` (`Binaries\Win32`).
+- Install Microsoft Visual C++ Redistributable 2015-2022 **x86**.
+- Remove other `dinput8.dll` mods - only one file with that name can be loaded.
 
-## Server or peer stays offline
+## The other player stays offline
 
-- Both players must use the same IP, UDP port, release and protocol version.
-- Run only one relay server.
+- Both players need the same release, the same port and the host's reachable
+  address (`127.0.0.1` only when the server runs on the same PC).
+- Only one relay server must run. The host starts it with *Save* in the `M`
+  menu or with `AliceCoop-Server.bat`.
 - Allow `AliceCoopServer.exe` through Windows Firewall for private networks.
-- Ping the VPN address and confirm both players are in the same VPN network.
-- Do not use the host's public Internet address without a trusted VPN.
+- With a VPN, check that both PCs are in the same VPN network and can ping each
+  other.
+
+## The role is wrong
+
+The role is read when the game starts. After changing it in the `M` menu,
+restart the game.
 
 ## Join does nothing
 
-- Wait until the host is fully in gameplay and not loading a map.
-- A join action is temporarily unavailable during a host cutscene or checkpoint
-  transition; wait for the yellow action to return and press `L`.
-- If the client profile has never initialized controls, start a normal new game
-  once or use verified host-profile synchronization and restart the client.
+- Wait until the host is fully in gameplay and not loading a map or playing a
+  cutscene, then press `L` again.
 
 ## Client loaded far away
 
-This is intentional during world construction. Wait until geometry and controls
-are ready, then press `O`. Prefer `P` during ordinary same-area gameplay.
+Wait until the level is ready and the client can move, then press `O`. Use `P`
+during normal play in the same area.
 
 ## A cutscene is waiting forever
 
-Move both players into the trigger area. If both are present and no encounter is
-still active, press `L` while the yellow force button is visible. Restart the
-checkpoint if the resulting world state is incomplete.
+Bring both players into the trigger area. If both are there, press `L` while the
+yellow action is visible. Restart the checkpoint if the world state looks wrong
+afterwards.
 
-## Proxy effects remain in the world
+## The game crashed
 
-Current builds periodically retire orphaned native glide effects and bound the
-optional static trail pools. Make sure both players use the same latest DLL. If
-the problem repeats, disable trails with `T` in the pause menu and attach the
-latest client log to an issue after redacting personal information.
+Send `AliceCoop\logs\AliceCoop_host_*.log` / `AliceCoop_client_*.log` and the
+`crash_*.txt` file from the game folder, after removing personal information.

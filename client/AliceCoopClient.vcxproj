@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -13,7 +13,7 @@
   <PropertyGroup Label="Globals">
     <ProjectGuid>{AAF74379-24F2-4893-A5B1-35C4CBDD0D1D}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-		<RootNamespace>AliceCoopClient</RootNamespace>
+    <RootNamespace>AliceCoopClient</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -49,6 +49,7 @@
     <TargetExt>.dll</TargetExt>
     <IncludePath>$(SolutionDir)src\;$(SolutionDir)include\;$(IncludePath)</IncludePath>
     <OutDir>$(SolutionDir)bin\$(Configuration)\</OutDir>
+    <LibraryPath>$(SolutionDir)lib;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
@@ -65,6 +66,7 @@
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_USRDLL;MADNESSPATCH_EXPORTS_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <LanguageStandard>stdcpplatest</LanguageStandard>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -81,7 +83,8 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;MADNESSPATCH_EXPORTS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <LanguageStandard>stdcpplatest</LanguageStandard>
-		<AdditionalIncludeDirectories>$(SolutionDir)include\SDK;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(SolutionDir)include\SDK;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <AdditionalModuleDependencies>
       </AdditionalModuleDependencies>
@@ -98,6 +101,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ModuleDefinitionFile>$(SolutionDir)src\dinput8.def</ModuleDefinitionFile>
       <AdditionalDependencies>winmm.lib;imm32.lib;version.lib;setupapi.lib;d3d9.lib;ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <GenerateMapFile>true</GenerateMapFile>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -130,7 +134,6 @@
     <ClCompile Include="..\src\Fixes\XAudio2Upgrade.cpp" />
     <ClCompile Include="..\src\General\IntroSkip.cpp" />
     <ClCompile Include="..\src\General\WarnAlice1InstallFolder.cpp" />
-    <ClCompile Include="..\src\General\AchievementSupport.cpp" />
     <ClCompile Include="..\src\Display\FontScaling.cpp" />
     <ClCompile Include="..\src\Display\AutoResolution.cpp" />
     <ClCompile Include="..\src\Display\UseWindowed.cpp" />
@@ -143,7 +146,6 @@
     <ClCompile Include="..\src\Graphics\FixAspectRatio.cpp" />
     <ClCompile Include="..\src\Graphics\MenuScripts.cpp" />
     <ClCompile Include="..\src\Graphics\AdaptivePhysXMemory.cpp" />
-    <ClCompile Include="..\src\MainLoop\BlockCameraInMenu.cpp" />
     <ClCompile Include="..\src\MainLoop\MainLoop.cpp" />
     <ClCompile Include="..\src\MainLoop\HysteriaLockOnGuard.cpp" />
     <ClCompile Include="..\src\MainLoop\FixStuckKeys.cpp" />
@@ -202,21 +204,6 @@
     <ClInclude Include="..\include\SDK\SDK_HEADERS\XAudio2_structs.hpp" />
     <ClInclude Include="..\src\Common.hpp" />
     <ClInclude Include="..\src\Coop\CoopClient.hpp" />
-    <ClInclude Include="..\src\Coop\Detail\Diagnostics.inl" />
-    <ClInclude Include="..\src\Coop\Detail\EngineInterop.inl" />
-    <ClInclude Include="..\src\Coop\Detail\InteractionDiscovery.inl" />
-    <ClInclude Include="..\src\Coop\Detail\LifecycleAndStatus.inl" />
-    <ClInclude Include="..\src\Coop\Detail\PresentationParticles.inl" />
-    <ClInclude Include="..\src\Coop\Detail\Projectiles.inl" />
-    <ClInclude Include="..\src\Coop\Detail\PublicHooks.inl" />
-    <ClInclude Include="..\src\Coop\Detail\RemoteActionVfx.inl" />
-    <ClInclude Include="..\src\Coop\Detail\RemoteAnimation.inl" />
-    <ClInclude Include="..\src\Coop\Detail\RemoteCosmetics.inl" />
-    <ClInclude Include="..\src\Coop\Detail\RemotePawn.inl" />
-    <ClInclude Include="..\src\Coop\Detail\RuntimeAndAnimationCapture.inl" />
-    <ClInclude Include="..\src\Coop\Detail\SharedWorldAndEnemies.inl" />
-    <ClInclude Include="..\src\Coop\Detail\TransportAndSaveSync.inl" />
-    <ClInclude Include="..\src\Coop\Detail\WorldAndProgression.inl" />
     <ClInclude Include="..\src\Coop\Protocol.hpp" />
     <ClInclude Include="..\src\Features.hpp" />
     <ClInclude Include="..\src\Globals.hpp" />

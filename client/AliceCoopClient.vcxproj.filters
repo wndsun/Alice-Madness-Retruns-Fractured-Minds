@@ -38,9 +38,6 @@
     <ClCompile Include="..\src\General\WarnAlice1InstallFolder.cpp">
       <Filter>src\General</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\General\AchievementSupport.cpp">
-      <Filter>src\General</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\Display\FontScaling.cpp">
       <Filter>src\Display</Filter>
     </ClCompile>
@@ -155,9 +152,6 @@
     <ClCompile Include="..\include\imgui\imgui_widgets.cpp">
       <Filter>include\imgui</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\MainLoop\BlockCameraInMenu.cpp">
-      <Filter>src\MainLoop</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\Input\InputBinding.cpp">
       <Filter>src\Input</Filter>
     </ClCompile>
@@ -188,51 +182,6 @@
     </ClInclude>
     <ClInclude Include="..\src\Coop\Protocol.hpp">
       <Filter>src\Coop</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\Diagnostics.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\EngineInterop.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\InteractionDiscovery.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\LifecycleAndStatus.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\PresentationParticles.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\Projectiles.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\PublicHooks.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\RemoteActionVfx.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\RemoteAnimation.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\RemoteCosmetics.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\RemotePawn.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\RuntimeAndAnimationCapture.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\SharedWorldAndEnemies.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\TransportAndSaveSync.inl">
-      <Filter>src\Coop\Detail</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\Coop\Detail\WorldAndProgression.inl">
-      <Filter>src\Coop\Detail</Filter>
     </ClInclude>
     <ClInclude Include="..\include\safetyhook\safetyhook.hpp">
       <Filter>safetyhook</Filter>
@@ -370,9 +319,6 @@
     </Filter>
     <Filter Include="src\Coop">
       <UniqueIdentifier>{7e839ff2-3dbb-49a3-8451-67446b4bbf28}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="src\Coop\Detail">
-      <UniqueIdentifier>{9ace395c-2d8e-4f1a-8a37-ed0739b75a79}</UniqueIdentifier>
     </Filter>
     <Filter Include="src\Fixes">
       <UniqueIdentifier>{d3c6f2e4-9a73-4b2c-9f50-4b8cae7d3f62}</UniqueIdentifier>

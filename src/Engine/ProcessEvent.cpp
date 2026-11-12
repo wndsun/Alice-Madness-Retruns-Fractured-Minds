@@ -36,17 +36,20 @@ static UFunction* g_pawnFadeOutWeapon = nullptr;
 static UFunction* g_pawnClearDelayAttach = nullptr;
 static UFunction* g_projectileInit = nullptr;
 static UFunction* g_projectilePostBeginPlay = nullptr;
+static UFunction* g_emitterPostBeginPlay = nullptr;
 static UFunction* g_rangeProjectileFire = nullptr;
 static UFunction* g_clockBombSetupStart = nullptr;
 static UFunction* g_clockBombDetonate = nullptr;
 static UFunction* g_clockBombDestroyed = nullptr;
 static UFunction* g_pcSetupClockBomb = nullptr;
 static UFunction* g_pcDetonateClockBomb = nullptr;
+static UFunction* g_pcCloneButtonPressed = nullptr;
 static UFunction* g_coopRestartAlice = nullptr;
 static UFunction* g_coopShowDeathConfirm = nullptr;
 static UFunction* g_coopContinueToGame = nullptr;
 static UFunction* g_coopLoadCheckpoint = nullptr;
 static UFunction* g_coopRespawnAlice = nullptr;
+static UFunction* g_coopTryCancelMatinee = nullptr;
 static UFunction* g_coopClientRestart = nullptr;
 static UFunction* g_coopDeathRestartGame = nullptr;
 static UFunction* g_coopMovieRestart = nullptr;
@@ -62,6 +65,11 @@ static UFunction* g_coopActorUsedBy = nullptr;
 static UFunction* g_coopOnInteractInLondon = nullptr;
 static UFunction* g_coopInteractInLondonX = nullptr;
 static UFunction* g_coopExitInteractState = nullptr;
+// londonclose1: inside state PlayerInteractInLondon the state's own
+// versions run (the class versions are empty), so they are hooked too.
+static UFunction* g_coopInteractInLondonXState = nullptr;
+static UFunction* g_coopExitInteractStateState = nullptr;
+static UFunction* g_coopInteractInLondonEndState = nullptr;
 static UFunction* g_coopTriggerInteracted = nullptr;
 static UFunction* g_coopNotifyInputKey = nullptr;
 static UFunction* g_coopClientTravel = nullptr;
@@ -86,6 +94,7 @@ static inline int DesiredControllerIconSet()
 
 static void __fastcall ProcessEvent_Hook(int This, void*, UFunction* Function, int uParams, int uResult)
 {
+	const long long perfStart = AliceCoop::IsEnabled() ? AliceCoop::PerfNow() : 0; // perf1
 	// Session-only host progression must not award story unlock trophies on a
 	// clean client profile. SetAbility calls this nested function normally; the
 	// ability itself is still applied, only its unrelated achievement side
@@ -114,6 +123,15 @@ static void __fastcall ProcessEvent_Hook(int This, void*, UFunction* Function, i
 			AliceCoop::RecordLocalAction(PlayerAction::StopFire);
 		else if (Function == g_dodge)
 			AliceCoop::RecordLocalAction(PlayerAction::Dodge);
+		else if (Function == g_coopRespawnAlice && g_coopRespawnAlice)
+			AliceCoop::RecordLocalAction(static_cast<PlayerAction>(13)); // Respawn
+		else if (Function == g_coopTryCancelMatinee && g_coopTryCancelMatinee)
+		{
+			// shared cutscene skip; true = the mod skipped it itself (a
+			// Matinee that drives enemies is jumped to its end).
+			if (AliceCoop::OnLocalCancelMatinee())
+				return;
+		}
 		else if (Function == g_changeShrinkingMode)
 		{
 			const AAlicePawn* pawn = g_State.AlicePlayerController->MyAlicePawn;
@@ -132,6 +150,17 @@ static void __fastcall ProcessEvent_Hook(int This, void*, UFunction* Function, i
 
 	if (AliceCoop::IsEnabled())
 	{
+		if (AliceCoop::TraceUiCall(reinterpret_cast<UObject*>(This), Function,
+				reinterpret_cast<void*>(uParams)))
+		{
+			return; // a second Start of an already open shared board
+		}
+		// Balance: no clock bomb on Q for the client (bomb spots still work).
+		if (Function == g_pcCloneButtonPressed && g_pcCloneButtonPressed
+			&& AliceCoop::ShouldBlockLocalClockBomb())
+		{
+			return;
+		}
 		if (Function == g_coopInGameMenuOpen)
 			AliceCoop::ObservePauseMenuState(true);
 		else if (Function == g_coopInGameMenuContinue
@@ -208,6 +237,9 @@ static void __fastcall ProcessEvent_Hook(int This, void*, UFunction* Function, i
 			|| Function == g_coopOnInteractInLondon
 			|| Function == g_coopInteractInLondonX
 			|| Function == g_coopExitInteractState
+			|| (Function && (Function == g_coopInteractInLondonXState
+				|| Function == g_coopExitInteractStateState
+				|| Function == g_coopInteractInLondonEndState))
 			|| Function == g_coopTriggerInteracted
 			|| Function == g_coopNotifyInputKey
 			|| Function == g_coopClientTravel
@@ -218,6 +250,9 @@ static void __fastcall ProcessEvent_Hook(int This, void*, UFunction* Function, i
 				reinterpret_cast<const void*>(uParams), false);
 		}
 	}
+	AliceCoop::CaptureParticleNotify(
+		reinterpret_cast<UObject*>(This), Function,
+		reinterpret_cast<const void*>(uParams));
 	if (AliceCoop::IsActionTraceEnabled())
 	{
 		AliceCoop::TraceProcessEvent(
@@ -230,6 +265,8 @@ static void __fastcall ProcessEvent_Hook(int This, void*, UFunction* Function, i
 			reinterpret_cast<UObject*>(This), Function,
 			reinterpret_cast<const void*>(uParams), false);
 	}
+	if (perfStart)
+		AliceCoop::PerfNoteProcessEvent(perfStart); // perf1
 	if (deferCoopSequenceActivation)
 		return;
 
@@ -363,6 +400,9 @@ static void __fastcall ProcessEvent_Hook(int This, void*, UFunction* Function, i
 			|| Function == g_coopOnInteractInLondon
 			|| Function == g_coopInteractInLondonX
 			|| Function == g_coopExitInteractState
+			|| (Function && (Function == g_coopInteractInLondonXState
+				|| Function == g_coopExitInteractStateState
+				|| Function == g_coopInteractInLondonEndState))
 			|| Function == g_coopTriggerInteracted
 			|| Function == g_coopNotifyInputKey
 			|| Function == g_coopClientTravel
@@ -380,6 +420,17 @@ static void __fastcall ProcessEvent_Hook(int This, void*, UFunction* Function, i
 			reinterpret_cast<const void*>(uParams), true);
 	}
 
+	// PostBeginPlay is the one point that reliably sees every bullet - the
+	// ProjectileFire and Init hooks below never fire, because those are
+	// script-to-script calls that do not pass through ProcessEvent. But at
+	// PostBeginPlay the bullet has not been aimed yet (zero velocity, default
+	// direction - every shot went the same way). So only note the bullet
+	// here; it is read and sent a frame later, once the game has aimed it.
+	if (AliceCoop::IsEnabled() && This && Function)
+	{
+		AliceCoop::NoteProjectileProcessEvent(
+			reinterpret_cast<UObject*>(This), Function);
+	}
 	if (AliceCoop::IsEnabled() && This
 		&& Function == g_projectilePostBeginPlay)
 	{
@@ -387,11 +438,25 @@ static void __fastcall ProcessEvent_Hook(int This, void*, UFunction* Function, i
 		if (object->IsA(
 			APepperGrinderPrimaryProjectile::StaticClass()))
 		{
-			auto* projectile = reinterpret_cast<
-				APepperGrinderPrimaryProjectile*>(This);
-			AliceCoop::OnLocalPepperProjectileSpawn(
-				projectile, projectile->FlightFront);
+			AliceCoop::QueueLocalPepperProjectile(reinterpret_cast<
+				APepperGrinderPrimaryProjectile*>(This));
 		}
+		else if (object->IsA(
+			ATeapotCannonProjectile::StaticClass()))
+		{
+			AliceCoop::QueueLocalTeapotProjectile(reinterpret_cast<
+				ATeapotCannonProjectile*>(This));
+		}
+	}
+
+	// Jump, float and glide effects are EmitterSpawnable actors spawned by
+	// script; the engine still announces each one through PostBeginPlay.
+	if (AliceCoop::IsEnabled() && This && g_emitterPostBeginPlay
+		&& Function == g_emitterPostBeginPlay)
+	{
+		auto* object = reinterpret_cast<UObject*>(This);
+		if (object->IsA(AEmitter::StaticClass()))
+			AliceCoop::QueueLocalEmitter(reinterpret_cast<AEmitter*>(This));
 	}
 
 	if (AliceCoop::IsEnabled() && This
@@ -559,6 +624,9 @@ static void __fastcall ProcessEvent_Hook(int This, void*, UFunction* Function, i
 		}
 	}
 
+	if (Function == g_updateCam && This && g_updateCam && AliceCoop::IsEnabled())
+		AliceCoop::ApplyFreeCamera(reinterpret_cast<void*>(This));
+
 	if (FixAspectRatio && g_State.isWideScreen && Function == g_updateCam && This && g_State.bRealGameplay)
 	{
 		AAlicePlayerController* pc = g_State.AlicePlayerController;
@@ -664,6 +732,8 @@ void ResolveProcessEventFunctions()
 		"Function AliceGame.AliceGameProjectile.Init");
 	g_projectilePostBeginPlay = UFunction::FindFunction(
 		"Function AliceGame.AliceGameProjectile.PostBeginPlay");
+	g_emitterPostBeginPlay = UFunction::FindFunction(
+		"Function Engine.Emitter.PostBeginPlay");
 	g_rangeProjectileFire = UFunction::FindFunction(
 		"Function AliceGame.WeaponForAliceRange.ProjectileFire");
 	g_clockBombSetupStart = UFunction::FindFunction(
@@ -676,6 +746,8 @@ void ResolveProcessEventFunctions()
 		"Function AliceGame.AlicePlayerController.SetupClockBomb");
 	g_pcDetonateClockBomb = UFunction::FindFunction(
 		"Function AliceGame.AlicePlayerController.DetonateClockBomb");
+	g_pcCloneButtonPressed = UFunction::FindFunction(
+		"Function AliceGame.AlicePlayerController.CloneButtonPressed");
 	g_coopRestartAlice = UFunction::FindFunction(
 		"Function AliceGame.AlicePlayerController.RestartAlice");
 	g_coopShowDeathConfirm = UFunction::FindFunction(
@@ -686,6 +758,8 @@ void ResolveProcessEventFunctions()
 		"Function AliceGame.AlicePlayerController.LoadCheckpoint");
 	g_coopRespawnAlice = UFunction::FindFunction(
 		"Function AliceGame.AlicePlayerController.RespawnAlice");
+	g_coopTryCancelMatinee = UFunction::FindFunction(
+		"Function AliceGame.AlicePlayerController.TryToCancelMatinee");
 	g_coopClientRestart = UFunction::FindFunction(
 		"Function AliceGame.AlicePlayerController.ClientRestart");
 	g_coopDeathRestartGame = UFunction::FindFunction(
@@ -717,6 +791,12 @@ void ResolveProcessEventFunctions()
 		"Function AliceGame.AlicePlayerController.interactInLondonX");
 	g_coopExitInteractState = UFunction::FindFunction(
 		"Function AliceGame.AlicePlayerController.exitInteractState");
+	g_coopInteractInLondonXState = UFunction::FindFunction(
+		"Function AliceGame.AlicePlayerController.PlayerInteractInLondon.interactInLondonX");
+	g_coopExitInteractStateState = UFunction::FindFunction(
+		"Function AliceGame.AlicePlayerController.PlayerInteractInLondon.exitInteractState");
+	g_coopInteractInLondonEndState = UFunction::FindFunction(
+		"Function AliceGame.AlicePlayerController.PlayerInteractInLondon.EndState");
 	g_coopTriggerInteracted = UFunction::FindFunction(
 		"Function Engine.PlayerController.TriggerInteracted");
 	g_coopNotifyInputKey = UFunction::FindFunction(

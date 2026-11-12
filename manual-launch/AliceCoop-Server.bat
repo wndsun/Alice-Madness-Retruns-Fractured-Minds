@@ -1,33 +1,31 @@
 @echo off
 setlocal
+rem AliceFracturedMinds relay server. Start it on ONE PC only.
+rem The host can also start it from the in-game M menu instead.
+rem The port is read from AliceCoop.ini [Network] Port. Optional overrides:
+rem   AliceCoop-Server.bat [bind-ip] [port]
 
-for %%I in ("%~dp0.") do set "SCRIPT_DIR=%%~fI"
-if not exist "%SCRIPT_DIR%\AliceCoop-LaunchConfig.bat" (
-    echo ERROR: AliceCoop-LaunchConfig.bat not found in:
-    echo %SCRIPT_DIR%
+for %%I in ("%~dp0.") do set "COOP_DIR=%%~fI"
+set "SERVER_EXE=%COOP_DIR%\AliceCoopServer.exe"
+if not exist "%SERVER_EXE%" (
+    echo ERROR: AliceCoopServer.exe was not found in:
+    echo %COOP_DIR%
     pause
     exit /b 1
 )
-call "%SCRIPT_DIR%\AliceCoop-LaunchConfig.bat"
-set "BIND_IP=%SERVER_BIND_IP%"
+
+set "BIND_IP=0.0.0.0"
+set "COOP_PORT=27018"
+if exist "%COOP_DIR%\AliceCoop.ini" (
+    for /f "tokens=1,* delims==" %%A in ('findstr /b /i /r /c:"Port *=" "%COOP_DIR%\AliceCoop.ini"') do set "COOP_PORT=%%B"
+)
+set "COOP_PORT=%COOP_PORT: =%"
 if not "%~1"=="" set "BIND_IP=%~1"
 if not "%~2"=="" set "COOP_PORT=%~2"
 
-set "COOP_DIR=%SCRIPT_DIR%"
-if not exist "%COOP_DIR%\AliceCoopServer.exe" (
-    for %%I in ("%SCRIPT_DIR%\..\..\Binaries\Win32\AliceCoop") do set "COOP_DIR=%%~fI"
-)
-set "SERVER_EXE=%COOP_DIR%\AliceCoopServer.exe"
-if not exist "%SERVER_EXE%" (
-    echo ERROR: AliceCoopServer.exe not found.
-    echo Checked: %SERVER_EXE%
-    pause
-    exit /b 1
-)
-
 cd /d "%COOP_DIR%"
-echo AliceCoop server
-echo Bind: %BIND_IP%:%COOP_PORT%
+echo AliceFracturedMinds relay server
+echo Listening on %BIND_IP%:%COOP_PORT% (UDP)
 echo Close this window or press Ctrl+C to stop the server.
 echo.
 

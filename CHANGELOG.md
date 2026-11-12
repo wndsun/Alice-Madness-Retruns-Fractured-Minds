@@ -1,36 +1,43 @@
 # Changelog
 
-All notable user-facing changes are documented here. Alice Co-op follows
-[Semantic Versioning](https://semver.org/) where practical; compatibility also
-depends on the protocol version shown in each release.
+All notable user-facing changes are listed here. Both players must use the same
+release: the network protocol version is shown in the log at start-up.
 
-## 0.1.0-alpha.1 — 2026-08-27
+## 1.0.0 - unreleased
 
-Initial alpha release.
+First release of AliceFracturedMinds, a fork of Alice Co-op 0.1.0-alpha.1.
 
 ### Added
 
-- Two-player host/client relay over UDP for LAN, localhost and VPN adapters.
-- A visible remote Alice proxy with movement, partial combat animation, weapons,
-  hair, dress and presentation effects.
-- Host-authoritative ordinary-enemy health, death, transforms and target changes.
-- Shared breakable-object destruction while keeping pickups local to each player.
-- Cutscene barriers, synchronized interaction cinematics and an emergency force
-  action for known script desynchronization cases.
-- Shared death/checkpoint restart and return-to-menu lifecycle handling.
-- Safe and forced player teleports.
-- Explicit, verified host-to-client profile synchronization with backups.
-- Main-menu and pause-menu status overlays.
-- Optional bounded proxy movement trails.
-- Standalone relay server, manual launch scripts and a common launch configuration.
-- MadnessPatch 3.1.1 functionality in the combined client DLL.
+- In-game menu (`M`): role (host/client), server address and port, saved to
+  `AliceCoop.ini`; the host can start the relay server from the menu.
+- Watching the host in the real-world (London) chapters.
+- Synchronized Executioner chase: shared hits, knockback, laugh and end of chase.
+- Shared enemy spawns after death, restart and Continue.
+- `AliceCoop.ini` switches: `[General] GameConsole`, `[Debug] Logs`,
+  `[Debug] Dumps`.
 
-### Known limitations
+### Changed
 
-- This is an experimental alpha, not native UE3 multiplayer.
-- Bosses and heavily scripted encounters may require checkpoint restart,
-  teleport, or the emergency cutscene action.
-- Some world mechanisms remain locally simulated and can visually desynchronize.
-- Remote animation, cloth, hair and weapon effects are approximations.
-- The relay has no authentication or encryption and must not be exposed directly
-  to the public Internet.
+- Normal launch through Steam or the EA App works without the external launcher
+  (`EnableWithoutLauncher = 1` by default).
+- The launch scripts no longer need `AliceCoop-LaunchConfig.bat`: settings come
+  from `AliceCoop.ini`.
+- One release archive that is extracted into `Binaries\Win32`.
+
+### Fixed
+
+- Many crashes during respawn, map changes and enemy teardown.
+- Cloned enemies after Continue, cutscene-skip desync, Elite Card Guard
+  encounters and checkpoint mismatches when continuing from the main menu.
+
+### Removed
+
+- External launcher, installer and uninstaller scripts.
+- Local test scripts (`AliceCoop-Both.bat`, `AliceCoop-Animation-Test.bat`,
+  `AliceCoop-Diagnostic-Both.bat`).
+
+## Alice Co-op 0.1.0-alpha.1 - 2026-08-27 (upstream)
+
+The original release by Docwitson that this fork is based on. See
+[the upstream repository](https://github.com/docwitson/Alice-Madness-Returns-Co-op).

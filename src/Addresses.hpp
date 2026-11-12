@@ -146,7 +146,7 @@ enum class Addr
 	WindowedMode,
 	Fullscreen,
 
-	// AchievementSupport
+	// Former AchievementSupport hooks (no longer used)
 	PlayerControllerConsoleCommand,
 	GameConsoleCommand,
 	ActorConsoleCommand,
@@ -160,7 +160,7 @@ enum class Addr
 	FileWriterOpen,
 	FileWriterDtor,
 
-	// AchievementOverlay
+	// Co-op overlay (ImGui on D3D9)
 	D3D9DevicePtr,
 	D3D9PresentWindowed,
 	D3D9PresentFullscreen,
@@ -321,7 +321,7 @@ namespace Addresses
 		/* WindowedMode                    */ { 0x773EB1, 0x774B9A, 0x745E78 },
 		/* Fullscreen                      */ { 0x14FE264, 0x14FE264, 0x147988C },
 
-		// AchievementSupport
+		// Former AchievementSupport hooks (no longer used)
 		/* PlayerControllerConsoleCommand  */ { 0x6DDE70, 0x6DE600, 0x6B32E0 },
 		/* GameConsoleCommand              */ { 0x89AA50, 0x89AC70, 0x8610C0 },
 		/* ActorConsoleCommand             */ { 0x728416, 0x728D36, 0x7021C6 },
@@ -335,7 +335,7 @@ namespace Addresses
 		/* FileWriterOpen                  */ { 0x47B520, 0x47B490, 0x46D3D0 },
 		/* FileWriterDtor                  */ { 0x47E520, 0x47E5C0, 0x470880 },
 
-		// AchievementOverlay
+		// Co-op overlay (ImGui on D3D9)
 		/* D3D9DevicePtr                   */ { 0x151C2AC, 0x151C2AC, 0x149521C },
 		/* D3D9PresentWindowed             */ { 0xC7B69C, 0xC7BCEC, 0xC2513C },
 		/* D3D9PresentFullscreen           */ { 0xC7B648, 0xC7BC98, 0xC250E8 },
