@@ -3,7 +3,7 @@
 All notable user-facing changes are listed here. Both players must use the same
 release: the network protocol version is shown in the log at start-up.
 
-## 1.0.0 - unreleased
+## 1.0.0 - released
 
 First release of AliceFracturedMinds, a fork of Alice Co-op 0.1.0-alpha.1.
 
