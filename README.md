@@ -4,6 +4,14 @@
   <img src="docs/media//spl01.png" width="1000" alt="AliceFracturedMinds">
 </p>
 
+Descriptions in other languages:
+Español: [README_SP](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/README_SP.md)
+日本語: [README_JP](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/README_JP.md)
+Русский: [README_RU](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/README_RU.md)
+Italiano: [README_IT](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/README_IT.md)
+Français: [README_FR](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/README_FR.md)
+Deutsch: [README_GE](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/README_GE.md)
+
 Two-player co-op for the PC version of *Alice: Madness Returns*.
 Based on / fork of [Alice Co-op](https://github.com/docwitson/Alice-Madness-Returns-Co-op) by Docwitson, built on [MadnessPatch](https://github.com/Wemino/MadnessPatch).
 
