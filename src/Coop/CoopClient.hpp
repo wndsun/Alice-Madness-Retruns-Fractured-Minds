@@ -8,6 +8,9 @@
 namespace AliceCoop
 {
 	void Initialize();
+	// trailfront1: puts the crash-trail handler in front of the crash
+	// reporter; call right after CrashHandler::Install().
+	void MoveCrashTrailHandlerToFront();
 	// musicwatch2: called from the XInputGetState hook (state = XINPUT_STATE*)
 	void FilterPadForMusicWatch(void* state, unsigned long* result);
 	void Tick();

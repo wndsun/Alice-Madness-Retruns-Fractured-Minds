@@ -604,6 +604,16 @@ namespace AchievementOverlay
     // visible console.
     inline void AliceCoopMenu_StartServerHidden()
     {
+        // serverjob1: a server this game did not start (left over from an
+        // earlier session, possibly an older build with another protocol) is
+        // replaced, so the host always gets a relay of this build.
+        static bool startedHere = false;
+        if (!startedHere && AliceCoopMenu_IsProcessRunning(L"AliceCoopServer.exe"))
+        {
+            AliceCoopMenu_StopServerIfRunning();
+            for (int wait = 0; wait < 20 && AliceCoopMenu_IsProcessRunning(L"AliceCoopServer.exe"); ++wait)
+                Sleep(50);
+        }
         if (AliceCoopMenu_IsProcessRunning(L"AliceCoopServer.exe"))
         {
             g_menuServerConfirmedRunning = true;
@@ -618,13 +628,34 @@ namespace AchievementOverlay
         STARTUPINFOA startupInfo{};
         startupInfo.cb = sizeof(startupInfo);
 
+        // serverjob1: the relay used to outlive the game - closed with
+        // Alt+F4, crashed or ended any other way, the game left the hidden
+        // AliceCoopServer.exe running (an old one then kept port 27018 and
+        // the next start reused it). The server is now put in a job object
+        // that kills it when the game's process goes away, however it ends.
+        // The job handle is held for the game's lifetime on purpose.
+        static HANDLE serverJob = []() -> HANDLE
+        {
+            HANDLE job = CreateJobObjectA(nullptr, nullptr);
+            if (!job)
+                return nullptr;
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
+            {
+                CloseHandle(job);
+                return nullptr;
+            }
+            return job;
+        }();
+
         PROCESS_INFORMATION processInfo{};
         const BOOL started = CreateProcessA(
             exePath.c_str(),
             nullptr,
             nullptr, nullptr,
             FALSE,
-            CREATE_NO_WINDOW,
+            CREATE_NO_WINDOW | CREATE_SUSPENDED,
             nullptr,
             workingDir.c_str(),
             &startupInfo, &processInfo);
@@ -637,6 +668,10 @@ namespace AchievementOverlay
             return;
         }
 
+        if (serverJob)
+            AssignProcessToJobObject(serverJob, processInfo.hProcess);
+        startedHere = true;
+        ResumeThread(processInfo.hThread);
         CloseHandle(processInfo.hThread);
 
         // Don't verify success yet — hold the process handle and check back

@@ -6,6 +6,7 @@
 #include "Common.hpp"
 #include "Coop/CoopClient.hpp"
 #include "Coop/Protocol.hpp"
+#include "GuardedRead.hpp"
 
 #include <algorithm>
 #include <array>
@@ -168,6 +169,7 @@ namespace AliceCoop
 	// ENEMYSPAWN / SHAREDTOUCH: defined far below in this (non-anonymous)
 	// scope, called from the anonymous namespace.
 	void OnLocalEnemySpawnFactoryActivated(USequenceOp* op);
+	void QueueRemoteSkip(std::uint64_t key, std::chrono::steady_clock::time_point now, bool started); // joincine2
 	void OnRemoteEnemySpawnTrigger(
 		const AliceCoopProtocol::SharedWorldEventPayload& event);
 	void TickSharedEnemySpawns();
@@ -1870,6 +1872,29 @@ namespace AliceCoop
 		std::string g_lastCheckpointEventMap;
 		std::string g_lastCheckpointEventName;
 		Clock::time_point g_joinLoadedAt{}; // the client's join finished
+		// joinsave1: the host's save files fetched for the restart after a join
+		std::atomic_bool g_joinSaveSyncPending{ false };
+		// jointp3: the join's own "come to the host" (teleport) state
+		Clock::time_point g_joinTeleportArmedAt{};
+		int g_joinTeleportTries = 0;
+		// jointp7: where a teleport put this Alice - LOADHOLD's "start" from
+		// then on
+		bool g_loadHoldRespot = false;
+		Clock::time_point g_joinSettledAt{}; // spawnjoin1: this Alice reached the host
+		// spawnjoin4: the last time the host sent an enemy this game has none of
+		Clock::time_point g_clientHostEnemyMissedAt{};
+		Clock::time_point g_clientHostEnemyMissingSince{}; // spawnjoin5: start of that streak
+		FVector g_loadHoldRespotAt{};
+		// jointp6: the host's checkpoint event, fired again here once this
+		// Alice stands with the host
+		std::uint64_t g_joinCheckpointKey = 0;
+		Clock::time_point g_joinCheckpointRefireAt{};
+		// jointp4: the client's streaming levels follow the host's for a
+		// while after a join; the host sends all of them when one arrives
+		Clock::time_point g_joinStreamFollowUntil{};
+		bool g_hostStreamFullNow = false;
+		std::atomic_bool g_joinSaveSyncCommitted{ false };
+		Clock::time_point g_joinSaveSyncStartedAt{};
 		std::string g_joinHostStatus;
 		std::string g_joinHostEligibilityMap;
 		std::uint32_t g_joinHostEligibilityEpoch = 0;
@@ -2730,6 +2755,8 @@ namespace AliceCoop
 			// after this and writes its own report.
 			if (info && info->ExceptionRecord
 				&& DiagCodeName(info->ExceptionRecord->ExceptionCode)
+				&& !(g_aliceGuardedReadDepth > 0 // guardread1
+					&& info->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
 				&& !IsDebuggerPresent())
 			{
 				DiagWriteCrashTrail(info);
@@ -3770,11 +3797,33 @@ namespace AliceCoop
 		// whole blocks; the crash reporter's handler would see a fault
 		// before any __except) - its slot is read only when the memory is
 		// there (cached VirtualQuery); -1 = not readable.
+		// guardread1 (13.11 11:39:59 host crash entering the title menu,
+		// FlushPendingLocalEmitters read at +4 of a freed object): the
+		// readable-region cache remembered memory the garbage collector had
+		// given back a moment later. The slot itself is now read under
+		// __try: freed memory gives -1 (not live) instead of a crash.
+		__declspec(noinline) int32_t ReadObjectSlotSeh(const UObject* object)
+		{
+			int32_t slot = -1;
+			++g_aliceGuardedReadDepth;
+			__try
+			{
+				slot = object->ObjectInternalInteger;
+			}
+			__except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION
+				? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+			{
+				slot = -1;
+			}
+			--g_aliceGuardedReadDepth;
+			return slot;
+		}
+
 		int32_t ReadObjectSlotGuarded(const UObject* object)
 		{
 			if (!IsHighAddressReadable(reinterpret_cast<std::uintptr_t>(object)))
 				return -1;
-			return object->ObjectInternalInteger;
+			return ReadObjectSlotSeh(object);
 		}
 
 		bool IsLiveUObject(const UObject* object)
@@ -6290,7 +6339,15 @@ namespace AliceCoop
 				committed ? SaveSyncAckStatus::TransferVerified
 					: SaveSyncAckStatus::TransferFailed,
 				0, committed ? 0u : 5u);
-			if (committed)
+			if (committed && g_joinSaveSyncPending.load())
+			{
+				// joinsave1: fetched for the restart after a join - the
+				// restart loads it, nothing else to do here
+				g_joinSaveSyncCommitted.store(true);
+				Log("SAVESYNC the host's checkpoint is saved here for the join restart (joinsave1).");
+				SetSaveSyncStatus("HOST CHECKPOINT RECEIVED", false, 100);
+			}
+			else if (committed)
 			{
 				{
 					std::lock_guard<std::mutex> lock(g_observedSavePathMutex);
@@ -10549,6 +10606,8 @@ namespace AliceCoop
 				enemy, WorldTraceKind::Enemy);
 			if (!base)
 				return 0;
+			// enemykey2 was tried and taken back (13.11 14:00: an unremembered
+			// key changed with every look and the binding was lost).
 			const int ordinal = g_enemyKeyOrdinals[base]++;
 			const std::uint64_t key = ordinal == 0 ? base
 				: base ^ (0x9E3779B97F4A7C15ull
@@ -11585,12 +11644,50 @@ namespace AliceCoop
 				}
 				auto* enemy =
 					reinterpret_cast<AAliceGameKynapsePawn*>(object);
+				// registrydiag1 (13.11 14:07:12: the Elite Card Guard left the
+				// registry 0.26 s after it was bound, though it lived on):
+				// why an enemy that was registered is dropped, logged once
+				const bool wasRegistered = [&]()
+				{
+					for (const auto& [oldKey, oldEnemy] : g_sharedEnemyRegistry)
+						if (oldEnemy == enemy)
+							return true;
+					return false;
+				}();
 				if (enemy->WorldInfo != world
 					|| enemy->bDeleteMe
 					|| enemy->bPendingDelete
 					|| !IsSharedEnemyPoseEligible(enemy))
 				{
-					continue;
+					// registrydiag1: a live, healthy enemy only "pending
+					// delete" (the spawner intro sets it while it plays) stays
+					if (enemy->WorldInfo == world && !enemy->bDeleteMe && enemy->bPendingDelete
+						&& (enemy->Health > 0 || g_config.role == Role::Client)
+						&& IsSharedEnemyPoseEligible(enemy))
+					{
+						static int keptLogs = 10;
+						if (keptLogs > 0)
+						{
+							--keptLogs;
+							Log("SHAREDPOSE " + ObjectName(enemy)
+								+ " is marked pending delete but alive (health "
+								+ std::to_string(enemy->Health) + "): kept (registrydiag1).");
+						}
+					}
+					else
+					{
+						static int droppedLogs = 20;
+						if (droppedLogs > 0 && (wasRegistered || enemy->WorldInfo == world))
+						{
+							--droppedLogs;
+							Log("SHAREDPOSE " + ObjectName(enemy) + " leaves the registry: world="
+								+ std::string(enemy->WorldInfo == world ? "same" : "other")
+								+ ", deleteMe=" + std::to_string(enemy->bDeleteMe)
+								+ ", pendingDelete=" + std::to_string(enemy->bPendingDelete)
+								+ ", health=" + std::to_string(enemy->Health) + " (registrydiag1).");
+						}
+						continue;
+					}
 				}
 				const std::uint64_t key =
 					SharedEnemyStableKey(enemy);
@@ -13303,10 +13400,19 @@ namespace AliceCoop
 					&& priorBinding->second.enemy
 					&& priorBinding->second.enemy->WorldInfo == world
 					&& !priorBinding->second.enemy->bDeleteMe
-					&& !priorBinding->second.enemy->bPendingDelete
-					&& g_clientEnemyHostKeyByActor.find(
-						priorBinding->second.enemy)
-						== g_clientEnemyHostKeyByActor.end()
+					&& (!priorBinding->second.enemy->bPendingDelete
+						|| priorBinding->second.enemy->Health > 0) // registrydiag1
+					&& [&]()
+					{
+						// bindkeep1 (13.11 14:00:25: the Elite Card Guard was
+						// bound and released 0.8 s later): the actor this
+						// binding made an alias of the host's key was then
+						// refused as "already aliased" - by its own alias.
+						const auto alias = g_clientEnemyHostKeyByActor.find(
+							priorBinding->second.enemy);
+						return alias == g_clientEnemyHostKeyByActor.end()
+							|| alias->second == pose.entityKey;
+					}()
 					&& (classSignature == 0
 						|| SharedEnemyClassSignature(
 							priorBinding->second.enemy)
@@ -13318,8 +13424,12 @@ namespace AliceCoop
 					g_sharedEnemyRegistry.find(pose.entityKey);
 				if (!enemy && found != g_sharedEnemyRegistry.end()
 					&& found->second
-					&& g_clientEnemyHostKeyByActor.find(found->second)
-						== g_clientEnemyHostKeyByActor.end())
+					&& [&]()
+					{
+						const auto alias = g_clientEnemyHostKeyByActor.find(found->second);
+						return alias == g_clientEnemyHostKeyByActor.end()
+							|| alias->second == pose.entityKey; // bindkeep1
+					}())
 				{
 					enemy = found->second;
 					localKey = found->first;
@@ -13340,8 +13450,12 @@ namespace AliceCoop
 							|| candidate->bPendingDelete
 							|| (candidateKey != pose.entityKey
 								&& advertisedKeys.count(candidateKey) != 0)
-							|| g_clientEnemyHostKeyByActor.find(candidate)
-								!= g_clientEnemyHostKeyByActor.end()
+							|| [&]()
+							{
+								const auto alias = g_clientEnemyHostKeyByActor.find(candidate);
+								return alias != g_clientEnemyHostKeyByActor.end()
+									&& alias->second != pose.entityKey; // bindkeep1
+							}()
 							|| SharedEnemyClassSignature(candidate)
 								!= classSignature)
 						{
@@ -13359,8 +13473,7 @@ namespace AliceCoop
 					}
 				}
 				if (!enemy || enemy->Health <= 0
-					|| enemy->bDeleteMe
-					|| enemy->bPendingDelete)
+					|| enemy->bDeleteMe)
 				{
 					continue;
 				}
@@ -17588,6 +17701,16 @@ namespace AliceCoop
 					if (SharedKeyForEnemy(candidate, SharedEnemyStableKey(candidate)) == key)
 						hit = candidate;
 				}
+				if (!hit && g_config.role == Role::Client)
+				{
+					if (g_clientHostEnemyMissingSince == Clock::time_point{}
+						|| g_clientHostEnemyMissedAt == Clock::time_point{}
+						|| now - g_clientHostEnemyMissedAt > std::chrono::seconds(3))
+					{
+						g_clientHostEnemyMissingSince = now; // spawnjoin5
+					}
+					g_clientHostEnemyMissedAt = now; // spawnjoin4
+				}
 			}
 			static int logsLeft = 30;
 			if (logsLeft > 0)
@@ -19726,6 +19849,29 @@ namespace AliceCoop
 			return parameters.ReturnValue;
 		}
 
+		// teapotboom1: the same trace, with the surface normal.
+		AActor* NativeActorTraceNormal(AActor* caller, const FVector& start, const FVector& end,
+			FVector& hitLocation, FVector& hitNormal)
+		{
+			static UFunction* function = nullptr;
+			if (!function)
+				function = FindFunctionSafe("Function Engine.Actor.Trace");
+			if (!function || !caller)
+				return nullptr;
+			AActor_execTrace_Params parameters{};
+			parameters.TraceEnd = end;
+			parameters.TraceStart = start;
+			parameters.bTraceActors = 1;
+			parameters.ExtraTraceFlags = 0;
+			if ((function->FunctionFlags & 0x400) != 0 && function->iNative != 0)
+				InvokeNativeFunction(caller, function, parameters);
+			else
+				caller->ProcessEvent(function, &parameters, nullptr);
+			hitLocation = parameters.HitLocation;
+			hitNormal = parameters.HitNormal;
+			return parameters.ReturnValue;
+		}
+
 		void LogAliceShots()
 		{
 			static int logsLeft = 80;
@@ -21143,11 +21289,58 @@ namespace AliceCoop
 				+ SharedWorldKeyText(key) + (stopped ? "." : ": the Stop input refused."));
 		}
 
+		// binkstop2 (13.11 12:33:10 crash in binkw32 BinkDoFrameAsyncWait,
+		// a write into a freed frame buffer): a movie the other player had
+		// skipped was stopped in the same frame it started here, while
+		// Bink's decoder thread was still filling its first frame. A stop
+		// now waits until the movie has run for 1 s here.
+		std::unordered_map<std::uint64_t, Clock::time_point> g_delayedBinkStops;
+
+		void RequestLocalBinkStop(USequenceOp* op, std::uint64_t key, const char* why)
+		{
+			const auto now = Clock::now();
+			const auto started = g_localBinkStartedAt.find(key);
+			const auto earliest = started != g_localBinkStartedAt.end()
+				? started->second + std::chrono::seconds(1) : now + std::chrono::seconds(1);
+			if (now >= earliest)
+			{
+				StopLocalBinkMovie(op, key, why);
+				return;
+			}
+			g_remoteStoppedBinks.insert(key);
+			g_delayedBinkStops[key] = earliest;
+			Log(std::string("BINKSKIP stop of key=") + SharedWorldKeyText(key) + " (" + why
+				+ ") waits until the movie has run 1 s (binkstop2).");
+		}
+
+		void TickDelayedBinkStops()
+		{
+			if (g_delayedBinkStops.empty())
+				return;
+			const auto now = Clock::now();
+			for (auto it = g_delayedBinkStops.begin(); it != g_delayedBinkStops.end();)
+			{
+				if (now < it->second)
+				{
+					++it;
+					continue;
+				}
+				const std::uint64_t key = it->first;
+				it = g_delayedBinkStops.erase(it);
+				if (WorldTransitionActive() || LeavingWorld())
+					continue;
+				USequenceOp* const op = FindBinkMovieAction(key);
+				if (op && op->bActive)
+					StopLocalBinkMovie(op, key, "the other player skipped it");
+			}
+		}
+
 		void DropStaleBinkState()
 		{
 			if (g_binkEpochSeen == g_skipEpoch.load())
 				return;
 			g_binkEpochSeen = g_skipEpoch.load();
+			g_delayedBinkStops.clear(); // binkstop2
 			g_pendingBinkStops.clear();
 			g_localBinkStartedAt.clear();
 			g_remoteStoppedBinks.clear();
@@ -21160,7 +21353,7 @@ namespace AliceCoop
 			USequenceOp* const op = FindBinkMovieAction(key);
 			if (op && op->bActive)
 			{
-				StopLocalBinkMovie(op, key, "the other player skipped it");
+				RequestLocalBinkStop(op, key, "the other player skipped it"); // binkstop2
 				return;
 			}
 			g_pendingBinkStops[key] = Clock::now() + std::chrono::seconds(20);
@@ -21188,7 +21381,7 @@ namespace AliceCoop
 					const bool fresh = now < pending->second;
 					g_pendingBinkStops.erase(pending);
 					if (fresh)
-						StopLocalBinkMovie(op, key, "skipped by the other player before it started here");
+						RequestLocalBinkStop(op, key, "skipped by the other player before it started here"); // binkstop2
 				}
 				return;
 			}
@@ -23001,6 +23194,10 @@ namespace AliceCoop
 				}
 			}
 			std::string result;
+			// jointp6: flag 4 = fire this checkpoint again (its save right
+			// after the join did not happen)
+			if (found && (payload.flags & 4u) != 0)
+				found->TriggerCount = 0;
 			if (!found)
 				result = "not found here";
 			else if ((payload.flags & 1u) != 0 && found->TriggerCount > 0)
@@ -23053,14 +23250,19 @@ namespace AliceCoop
 			// came into its map - saved here now, the checkpoint restart takes
 			// this Alice to it (instead of the chapter start the join loads).
 			if ((payload.flags & 2u) != 0 && g_config.role == Role::Client && found
-				&& result.rfind("fired=yes", 0) == 0
+				&& (result.rfind("fired=yes", 0) == 0
+					|| result == "checkpoint already saved here") // joinlatest2
 				&& g_joinLoadedAt != Clock::time_point{}
 				&& Clock::now() - g_joinLoadedAt < std::chrono::seconds(60))
 			{
-				g_joinRestartPending = true;
-				g_joinRestartArmedAt = Clock::now();
-				Log("JOINLATEST the host's latest checkpoint is saved here: both games restart from"
-					" their checkpoint in 4 s, so this Alice comes in where the host is (joinlatest1).");
+				// jointp3: the checkpoint restart reloads the checkpoint the
+				// game holds in memory (13.11 12:00:43: the copied host file
+				// was not read, the client came up at -29761 and pulled the
+				// host back there) - no restart: this Alice saved the host's
+				// checkpoint and is brought to the host instead
+				g_joinLoadedAt = {};
+				g_joinCheckpointKey = payload.entityKey; // jointp6
+				Log("JOINLATEST the host's latest checkpoint is saved here; this Alice goes to the host (jointp3).");
 			}
 		}
 
@@ -24186,25 +24388,31 @@ namespace AliceCoop
 		// it and both restart from their checkpoint, see SHAREDSEQ RX).
 		void TickPeerArrival()
 		{
-			static std::string lastPeerMap;
+			static bool peerWasHere = false;
 			static Clock::time_point sendAt{};
 			if (g_config.role != Role::Host || !g_connected || g_config.localMirror)
 			{
-				lastPeerMap.clear();
+				peerWasHere = false;
 				sendAt = {};
 				return;
 			}
 			const auto now = Clock::now();
 			const std::string peerMap = g_remotePresentation.valid
 				? std::string(g_remotePresentation.state.mapName) : std::string();
-			if (peerMap != lastPeerMap)
+			// joinlatest2 (13.11 11:50:49): the client went to the menu and
+			// back within seconds - its map name never left this map in the
+			// state seen here, so "came into this map" was never noticed and
+			// nothing was sent. Arrival is now the moment the other player's
+			// state (fresh, this map) appears again, as the shared touches
+			// see it.
+			const bool peerHere = !peerMap.empty() && !g_currentMap.empty()
+				&& _stricmp(peerMap.c_str(), g_currentMap.c_str()) == 0
+				&& _stricmp(g_currentMap.c_str(), "AliceEntry") != 0;
+			const bool arrived = peerHere && !peerWasHere;
+			peerWasHere = peerHere;
+			if (arrived)
+				g_hostStreamFullNow = true; // jointp4
 			{
-				const bool arrived = !peerMap.empty() && !g_currentMap.empty()
-					&& _stricmp(peerMap.c_str(), g_currentMap.c_str()) == 0
-					&& _stricmp(g_currentMap.c_str(), "AliceEntry") != 0
-					&& !lastPeerMap.empty()
-					&& _stricmp(lastPeerMap.c_str(), g_currentMap.c_str()) != 0;
-				lastPeerMap = peerMap;
 				if (arrived)
 				{
 					if (g_inGameMenuOpenSignal)
@@ -24217,8 +24425,11 @@ namespace AliceCoop
 					if (g_lastCheckpointEventKey != 0
 						&& _stricmp(g_lastCheckpointEventMap.c_str(), g_currentMap.c_str()) == 0)
 					{
-						sendAt = now + std::chrono::seconds(3);
+						sendAt = now + std::chrono::seconds(5);
 					}
+					Log("JOINLATEST the other player came into " + g_currentMap + ", latest checkpoint here: "
+						+ (g_lastCheckpointEventKey ? g_lastCheckpointEventName : std::string("<none>"))
+						+ " (joinlatest2).");
 				}
 			}
 			if (sendAt != Clock::time_point{} && now >= sendAt)
@@ -49431,6 +49642,59 @@ namespace AliceCoop
 					}
 					else
 						normal = FVector(0.0f, 0.0f, 1.0f);
+					// teapotboom1 (13.11 14:40:35.58, client: the host's shell
+					// hit the Elite Card Guard - on the host a burst, here
+					// nothing): the copy's Explode finds its burst by a 30-unit
+					// trace along the given normal, and the normal (back along
+					// the flight) pointed into the air beside the guard -
+					// AliceGameProjectile.SpawnExplosionDecal returned without
+					// a surface, no effect. An enemy at the end point is
+					// passed as the target with bForceTraceGround (the game's
+					// own path for a hit on a pawn: it always plays the burst);
+					// otherwise the real surface and its normal are traced.
+					AActor* burstTarget = nullptr;
+					FVector burstLocation = location;
+					if ((event.variant & 1u) != 0) // teapot shells only
+					{
+						float bestDistance = 260.0f * 260.0f;
+						for (const auto& [enemyKey, enemy] : g_sharedEnemyRegistry)
+						{
+							if (!enemy || !IsLiveUObject(enemy) || enemy->bDeleteMe
+								|| enemy->WorldInfo != g_currentWorld)
+							{
+								continue;
+							}
+							const float dx = enemy->Location.X - location.X;
+							const float dy = enemy->Location.Y - location.Y;
+							const float dz = enemy->Location.Z - location.Z;
+							const float distance = dx * dx + dy * dy + dz * dz;
+							if (distance < bestDistance)
+							{
+								bestDistance = distance;
+								burstTarget = enemy;
+							}
+						}
+					}
+					const bool teapotShell = (event.variant & 1u) != 0;
+					if (!burstTarget && teapotShell)
+					{
+						FVector hitLocation{}, hitNormal{};
+						const FVector along(-normal.X * 80.0f, -normal.Y * 80.0f, -normal.Z * 80.0f);
+						AActor* hit = NativeActorTraceNormal(shot,
+							FVector(location.X - along.X, location.Y - along.Y, location.Z - along.Z),
+							FVector(location.X + along.X, location.Y + along.Y, location.Z + along.Z),
+							hitLocation, hitNormal);
+						if (!hit)
+						{
+							hit = NativeActorTraceNormal(shot, FVector(location.X, location.Y, location.Z + 40.0f),
+								FVector(location.X, location.Y, location.Z - 250.0f), hitLocation, hitNormal);
+						}
+						if (hit && (hitNormal.X != 0.0f || hitNormal.Y != 0.0f || hitNormal.Z != 0.0f))
+						{
+							burstLocation = hitLocation;
+							normal = hitNormal;
+						}
+					}
 					NativeSetActorLocationNoCheck(shot, location);
 					if (const auto flight = g_remoteShotFlight.find(shot);
 						flight != g_remoteShotFlight.end())
@@ -49444,10 +49708,15 @@ namespace AliceCoop
 					if (explode)
 					{
 						AProjectile_execExplode_Params parameters{};
-						parameters.HitLocation = location;
+						parameters.HitLocation = burstLocation;
 						parameters.HitNormal = normal;
-						parameters.TargetActor = nullptr;
+						parameters.TargetActor = burstTarget;
+						auto* const projectile = reinterpret_cast<AAliceGameProjectile*>(shot);
+						const bool oldForceGround = projectile->bForceTraceGround != 0;
+						if (burstTarget)
+							projectile->bForceTraceGround = 1u;
 						shot->ProcessEvent(explode, &parameters, nullptr);
+						projectile->bForceTraceGround = oldForceGround ? 1u : 0u;
 					}
 					// The copy itself is taken away by the resting timeout
 					// (TickRemoteShotTimeouts -> RetireShotActor) once its
@@ -49463,7 +49732,9 @@ namespace AliceCoop
 							+ std::to_string(location.X) + ','
 							+ std::to_string(location.Y) + ','
 							+ std::to_string(location.Z) + "), explode="
-							+ (explode ? "yes" : "MISSING") + '.');
+							+ (explode ? "yes" : "MISSING")
+							+ ", burstOn=" + (burstTarget ? ObjectName(burstTarget) : std::string("surface"))
+							+ " (teapotboom1).");
 					}
 					break;
 				}
@@ -50275,6 +50546,8 @@ namespace AliceCoop
 			localPawn->Velocity = FVector(0.0f, 0.0f, 0.0f);
 			localPawn->FarMoveSetLocation(destination, true);
 			g_lastCutsceneStartAt = Clock::now(); // fallhold1: a fall right after a teleport is held too
+			g_loadHoldRespot = true; // jointp7
+			g_loadHoldRespotAt = destination;
 			const float remainingDistanceSquared =
 				(localPawn->Location - destination).SizeSquared();
 			bool nativeLocationApplied = true;
@@ -50700,6 +50973,12 @@ namespace AliceCoop
 			// restartrejoin1: see TickRestartRejoin.
 			g_restartRejoinCheckAt = Clock::now() + std::chrono::seconds(8);
 			g_clientRestartAcceptedAt = Clock::now(); // streamsync1
+			// jointp3: the restart reloads THIS game's checkpoint in memory -
+			// after a join that is the start of the map; the client is then
+			// brought to the host as after a join
+			g_joinTeleportArmedAt = Clock::now() + std::chrono::seconds(2);
+			g_joinTeleportTries = 0;
+			g_joinStreamFollowUntil = Clock::now() + std::chrono::seconds(60); // jointp4
 			Log("GROUPLIFE client accepted host checkpoint command "
 				"serial="
 				+ std::to_string(
@@ -52083,6 +52362,7 @@ namespace AliceCoop
 			g_standSurfacesWorld = g_currentWorld;
 			g_nextStandSurfaceScan = now + std::chrono::seconds(3);
 			g_standSurfaces.clear();
+			g_balanceByKey.clear(); // balancefree1: rebuilt from the fresh scan
 			UClass* const padClass = APressurePad::StaticClass();
 			UClass* const platformClass = ABalancePlatform::StaticClass();
 			TArray<UObject*>* objects = UObject::GObjObjects();
@@ -59366,7 +59646,7 @@ namespace AliceCoop
 			for (const StandSurface& surface : g_standSurfaces)
 			{
 				AActor* const actor = surface.actor;
-				if (surface.pad || !actor || !IsUsableObjectFast(actor) || actor->bDeleteMe)
+				if (surface.pad || !actor || !IsLiveUObject(actor) || actor->bDeleteMe) // balancefree1
 					continue;
 				const std::uint64_t key = SequenceActionStableKey(actor);
 				if (!key)
@@ -59407,7 +59687,12 @@ namespace AliceCoop
 			if (found == g_balanceByKey.end())
 				continue;
 			AActor* const actor = found->second;
-			if (!actor || !IsUsableObjectFast(actor) || actor->bDeleteMe)
+			// balancefree1 (13.11 12:18:50 client crash in TickBalanceSync:
+			// a call through the vtable of a platform whose streaming level
+			// had just been unloaded - the key map is filled once and kept):
+			// only a live platform of this world is moved
+			if (!actor || !IsLiveUObject(actor) || actor->bDeleteMe
+				|| actor->WorldInfo != g_currentWorld)
 				continue;
 			const FVector delta(wish.target.X - actor->Location.X,
 				wish.target.Y - actor->Location.Y, wish.target.Z - actor->Location.Z);
@@ -60184,6 +60469,78 @@ namespace AliceCoop
 		}
 	}
 
+	// jointp4: every level the host shows (as last reported) is loaded and
+	// shown here too; true as well when nothing is known or 20 s passed
+	bool JoinHostLevelsReady(Clock::duration sinceJoin)
+	{
+		if (sinceJoin > std::chrono::seconds(20) || !g_currentWorld)
+			return true;
+		if (g_hostStreamWishWorld != g_currentWorld || g_hostStreamWish.empty())
+			return sinceJoin > std::chrono::seconds(8); // the host's list not here yet
+		static Clock::time_point lastLog{};
+		const int32_t count = std::min<int32_t>(g_currentWorld->StreamingLevels.size(), 512);
+		for (int32_t index = 0; index < count; ++index)
+		{
+			ULevelStreaming* const level = g_currentWorld->StreamingLevels.at(index);
+			if (!level || !IsUsableObjectFast(level))
+				continue;
+			const auto found = g_hostStreamWish.find(StreamLevelKey(level));
+			if (found == g_hostStreamWish.end() || !found->second.visible)
+				continue;
+			if (!level->LoadedLevel || !level->bIsVisible)
+			{
+				const auto now = Clock::now();
+				if (now - lastLog > std::chrono::seconds(2))
+				{
+					lastLog = now;
+					Log("JOINTP waiting for " + level->PackageName.ToString()
+						+ " to load before going to the host (jointp4).");
+				}
+				return false;
+			}
+		}
+		return true;
+	}
+
+	// jointp5 (13.11 12:18:03-06 and 12:18:28-45): West_04 was set to load
+	// three times and dropped again by this game's own streaming each time
+	// (then the 3-per-30 s limit stopped it) - the client stood far away at
+	// the map's start. While a join waits to bring this Alice to the host,
+	// every level the host shows is kept loaded and shown, every frame (as
+	// streamkeep1 does for an Alice Matinee).
+	void TickJoinStreamKeep()
+	{
+		if (g_config.role != Role::Client
+			|| (g_joinTeleportArmedAt == Clock::time_point{} && Clock::now() >= g_joinStreamFollowUntil)
+			|| !g_connected || !g_currentWorld || !IsUsableObjectFast(g_currentWorld)
+			|| WorldTransitionActive() || g_hostStreamWishWorld != g_currentWorld
+			|| g_hostStreamWish.empty())
+		{
+			return;
+		}
+		static int logsLeft = 30;
+		const int32_t count = std::min<int32_t>(g_currentWorld->StreamingLevels.size(), 512);
+		for (int32_t index = 0; index < count; ++index)
+		{
+			ULevelStreaming* const level = g_currentWorld->StreamingLevels.at(index);
+			if (!level || !IsUsableObjectFast(level))
+				continue;
+			const auto found = g_hostStreamWish.find(StreamLevelKey(level));
+			if (found == g_hostStreamWish.end() || !found->second.visible)
+				continue;
+			if (level->bShouldBeLoaded && level->bShouldBeVisible)
+				continue;
+			if (logsLeft > 0)
+			{
+				--logsLeft;
+				Log("JOINTP keeping " + level->PackageName.ToString()
+					+ " loaded as on the host until this Alice is there (jointp5).");
+			}
+			level->bShouldBeLoaded = true;
+			level->bShouldBeVisible = true;
+		}
+	}
+
 	void TickStreamLevelSync()
 	{
 		if (!g_connected || g_config.localMirror || !g_currentWorld
@@ -60209,7 +60566,12 @@ namespace AliceCoop
 				sent.clear();
 				fullAt = {};
 			}
-			const bool full = now >= fullAt;
+			bool full = now >= fullAt;
+			if (g_hostStreamFullNow) // jointp4: the other player just came in
+			{
+				g_hostStreamFullNow = false;
+				full = true;
+			}
 			if (full)
 				fullAt = now + std::chrono::seconds(10);
 			int queued = 0;
@@ -60237,8 +60599,10 @@ namespace AliceCoop
 		}
 		// Client.
 		const bool spectating = IsSpectatingHost();
-		const bool afterRestart = g_clientRestartAcceptedAt != Clock::time_point{}
+		const bool restartWindow = g_clientRestartAcceptedAt != Clock::time_point{}
 			&& now - g_clientRestartAcceptedAt < std::chrono::seconds(40);
+		const bool joinWindow = now < g_joinStreamFollowUntil; // jointp4: after a join too
+		const bool afterRestart = restartWindow || joinWindow;
 		if ((!spectating && !afterRestart) || g_hostStreamWish.empty()
 			|| g_hostStreamWishWorld != g_currentWorld)
 		{
@@ -60258,6 +60622,11 @@ namespace AliceCoop
 				continue;
 			const bool load = wish.load || wish.visible;
 			if (level->bShouldBeLoaded == load && level->bShouldBeVisible == wish.visible)
+				continue;
+			// jointp5 (13.11 12:18:25): right after a join the host's list
+			// unloaded West_01/West_02 under the client (it stands at the
+			// map's start) - in the join window levels are only added
+			if (joinWindow && !restartWindow && !load)
 				continue;
 			// streamsync2 (04.11 18:00:05-18:00:50: Chapter1_L1_Cin_114 was
 			// set 1->0 every second for 45 s - something here keeps loading
@@ -64483,8 +64852,22 @@ namespace AliceCoop
 				|| (!InterpHasDirectorTrack(action)
 					&& !IsSpawnerStyleCinematic(action))
 				|| (key == g_recentReleasedCutsceneKey
-					&& now < g_recentReleasedCutsceneUntil))
+					&& now < g_recentReleasedCutsceneUntil)
+				)
 			{
+				return false;
+			}
+			// joincine1 (13.11 13:22:29: the barrier here, armed before the
+			// activation, pulled the host to the map's start again): while
+			// this Alice is joining, a cutscene is her own - and it is
+			// skipped here as soon as it plays (joincine2: the map's start
+			// cutscene put her back at the start after the teleport)
+			if (g_config.role == Role::Client
+				&& g_joinTeleportArmedAt != Clock::time_point{})
+			{
+				QueueRemoteSkip(key, now, false);
+				Log("CUTSCENEBARRIER key=" + SharedWorldKeyText(key)
+					+ " started while this Alice joins the host: hers only, skipped (joincine2).");
 				return false;
 			}
 
@@ -64914,6 +65297,7 @@ namespace AliceCoop
 			Clock::time_point lastForced{};
 			int spawnedAtForce = -1; // spawnforce1
 			int forceMisses = 0;     // spawnforce1
+			bool joinRetried = false; // spawnjoin2
 			Clock::time_point lastLookup{};
 			Clock::time_point lastSent{};
 			bool lookupFailLogged = false; // spawndiag1
@@ -65036,6 +65420,33 @@ namespace AliceCoop
 				}
 			}
 			return nullptr;
+		}
+
+		// spawnjoin4: another live instance of the same factory (its level was
+		// unloaded and loaded again here) - a fresh one is preferred.
+		USeqAct_ActorFactory* FindOtherSharedSpawnFactory(std::uint64_t key, USeqAct_ActorFactory* current)
+		{
+			TArray<UObject*>* objects = UObject::GObjObjects();
+			if (!objects || key == 0)
+				return nullptr;
+			USeqAct_ActorFactory* best = nullptr;
+			for (int32_t index = 0; index < objects->size(); ++index)
+			{
+				UObject* object = objects->at(index);
+				if (!object || object == current || object->IsDefaultObject()
+					|| !IsUsableObjectFast(object)
+					|| !object->IsA(USeqAct_ActorFactory::StaticClass())
+					|| SequenceActionStableKey(object) != key)
+				{
+					continue;
+				}
+				auto* const candidate = reinterpret_cast<USeqAct_ActorFactory*>(object);
+				if (!IsLiveSpawnFactory(candidate))
+					continue;
+				if (!best || (best->SpawnedCount > 0 && candidate->SpawnedCount <= 0))
+					best = candidate;
+			}
+			return best;
 		}
 
 		std::string SpawnFactoryText(const SharedSpawnCounter& counter)
@@ -65383,12 +65794,51 @@ namespace AliceCoop
 				g_nextSharedSpawnResend = now + std::chrono::seconds(5);
 				resend = true;
 			}
+			// spawnjoin4 (13.11 14:18:26.9, client: right after the join the
+			// game unloaded the arena's NPC level and loaded it again - the
+			// first Elite Card Guard went with it, the counters said "done",
+			// the dead factory was never looked up again and the host's guard
+			// stayed "not here"). In the first 30 s after this Alice reached
+			// the host, a factory whose enemy is missing is looked up again.
+			// spawnjoin5 (13.11 14:29:17.8-23.1: the guard came back 5 s
+			// late - the repair waited for this Alice to reach the host):
+			// it also runs while she is still on her way there.
+			const bool joinRepairWindow = g_config.role == Role::Client
+				&& (g_joinTeleportArmedAt != Clock::time_point{}
+					|| (g_joinSettledAt != Clock::time_point{}
+						&& now - g_joinSettledAt < std::chrono::seconds(30)));
+			// spawnjoin6: the streak only counts from when this game has no
+			// enemy at all (13.11 14:35: it began before the guard was gone)
+			if (!g_sharedEnemyRegistry.empty())
+				g_clientHostEnemyMissingSince = {};
+			const bool hostEnemyMissing = joinRepairWindow
+				&& g_sharedEnemyRegistry.empty()
+				&& g_clientHostEnemyMissedAt != Clock::time_point{}
+				&& now - g_clientHostEnemyMissedAt < std::chrono::seconds(3);
 			for (auto& [key, counter] : g_sharedSpawns)
 			{
+				if (hostEnemyMissing && !counter.joinRetried
+					&& (counter.remote > 0 || counter.natural > 0) // spawnjoin6
+					&& now - counter.lastLookup >= std::chrono::seconds(1))
+				{
+					counter.lastLookup = now;
+					USeqAct_ActorFactory* const other = FindOtherSharedSpawnFactory(key,
+						IsLiveSpawnFactory(counter.factory) ? counter.factory : nullptr);
+					if (other && other != counter.factory
+						&& (!IsLiveSpawnFactory(counter.factory)
+							|| (counter.factory->SpawnedCount > 0 && other->SpawnedCount <= 0)))
+					{
+						Log("ENEMYSPAWN key=" + SharedWorldKeyText(key) + ": the factory was loaded again here, now "
+							+ ObjectName(other) + " (spawnjoin4).");
+						counter.factory = other;
+					}
+				}
 				if (!IsLiveSpawnFactory(counter.factory))
 				{
 					counter.factory = nullptr;
-					if (counter.remote > counter.done
+					if ((counter.remote > counter.done
+							|| (hostEnemyMissing && !counter.joinRetried
+								&& (counter.remote > 0 || counter.natural > 0)))
 						&& now - counter.lastLookup
 							>= std::chrono::milliseconds(500))
 					{
@@ -65534,6 +65984,75 @@ namespace AliceCoop
 						+ SpawnFactoryText(counter) + ").");
 					counter.done = counter.remote;
 					continue;
+				}
+				// spawnjoin1 (13.11 13:01:19-22, Armored Card Guard arena): the
+				// host's spawn was mirrored the moment the client joined - its
+				// Alice still at the map's start (12 000 units away, pulled
+				// back there by the start cutscene), the arena not loaded: the
+				// guard was spawned and gone 0.3 s later, and the client
+				// fought nothing. A spawn is mirrored once this Alice stands
+				// with the host (and 2 s after).
+				// spawnjoin5: an enemy the host has and this game lost (gone
+				// for 1.5 s, its factory loaded again) is not held back
+				const bool repairNow = hostEnemyMissing && !counter.joinRetried
+					&& g_clientHostEnemyMissingSince != Clock::time_point{}
+					&& now - g_clientHostEnemyMissingSince > std::chrono::milliseconds(1500);
+				if (g_config.role == Role::Client && !repairNow
+					&& (g_joinTeleportArmedAt != Clock::time_point{}
+						|| (g_joinSettledAt != Clock::time_point{}
+							&& now - g_joinSettledAt < std::chrono::seconds(2))))
+				{
+					continue;
+				}
+				// spawnjoin2 (13.11 13:28:00: right after the join this game's
+				// own Kismet counted the Elite Card Guard factory as used -
+				// natural=1 done=1 - but no guard came out of it; the host's
+				// guard (key f79dc...) was "not here" from then on and the
+				// client fought nothing). In the first 30 s after this Alice
+				// reached the host, a factory the host used that has spawned
+				// nothing here is mirrored again, once.
+				if (g_config.role == Role::Client && !counter.joinRetried
+					&& (repairNow || (g_joinSettledAt != Clock::time_point{}
+						&& now - g_joinSettledAt < std::chrono::seconds(30)))
+					// spawnjoin6 (13.11 14:35:00: the host's map change cleared
+					// its count - its guard alive, but its spawn never came
+					// here again, remote=0): our own used factory counts too
+					&& ((counter.remote > 0 && counter.done >= counter.remote)
+						|| (repairNow && counter.remote == 0 && counter.natural > 0))
+					&& counter.expectForced == 0
+					// spawnjoin3 (13.11 13:40:29: this game's own activation
+					// stuck at spawning=1 active=1 spawned=0 for good - the
+					// check waited for it to finish and never fired)
+					// spawnjoin4: or its enemy is gone here (destroyed with
+					// its level) while the host still has it
+					&& (factory->SpawnedCount <= 0 || hostEnemyMissing)
+					// 13.11 13:34:12: a factory mirrored a moment ago (its
+					// enemy still to come) was taken for an empty one and
+					// mirrored twice - only one quiet for 4 s counts
+					&& (counter.lastForced == Clock::time_point{}
+						|| now - counter.lastForced > std::chrono::seconds(4))
+					&& ((repairNow && counter.remote == 0)
+						|| (counter.firstRemoteAt != Clock::time_point{}
+							&& now - counter.firstRemoteAt > std::chrono::seconds(4))))
+				{
+					counter.joinRetried = true;
+					if (counter.remote == 0)
+						counter.remote = 1; // spawnjoin6: the mirror below runs it
+					if (factory->bIsSpawning || factory->bActive)
+					{
+						// spawnjoin3: the stuck spawn is stopped first, so
+						// the mirrored start below begins a fresh one
+						factory->bIsSpawning = 0u;
+						factory->bActive = 0u;
+						Log("ENEMYSPAWN key=" + SharedWorldKeyText(key)
+							+ ": its spawn here was stuck (spawning, nothing out) - restarted (spawnjoin3).");
+					}
+					counter.done = 0;
+					counter.natural = 0;
+					counter.forceMisses = 0;
+					counter.spawnedAtForce = -1;
+					Log("ENEMYSPAWN key=" + SharedWorldKeyText(key)
+						+ ": used here after the join but nothing spawned - mirrored again (spawnjoin2).");
 				}
 				if (counter.remote > counter.done + counter.expectForced
 					&& counter.expectForced == 0
@@ -66487,6 +67006,26 @@ namespace AliceCoop
 					now + std::chrono::milliseconds(750);
 				return false;
 			}
+			// spawnercine1 (13.11 13:53:48, after a restart, and 13:46:43 after
+			// a join): the host held the Elite Card Guard spawner's intro and
+			// asked for it here; started on the client, that Matinee took the
+			// guard the client had just mirrored (bound to the host's, gone
+			// 0.3 s later) - the client fought nothing. An enemy spawner's
+			// Matinee is never started here on the host's request: the
+			// enemies come through the shared spawns, and the host's wait
+			// ends on its own.
+			if (g_config.role == Role::Client
+				&& ContainsCaseInsensitive(ObjectName(action), "_Spawner_Seq"))
+			{
+				static int spawnerLogs = 10;
+				if (spawnerLogs > 0)
+				{
+					--spawnerLogs;
+					Log("CUTSCENEEMERGENCY not started key=" + SharedWorldKeyText(key) + ", action="
+						+ ObjectName(action) + ": an enemy spawner's Matinee (spawnercine1).");
+				}
+				return true;
+			}
 			if (action->bActive || action->bIsPlaying)
 			{
 				Log("CUTSCENEEMERGENCY action already active key="
@@ -67030,7 +67569,12 @@ namespace AliceCoop
 		for (int32_t i = 0; i < action->GroupInst.size(); ++i)
 		{
 			UInterpGroupInst* const group = action->GroupInst.at(i);
-			if (!group || !IsUsableObjectFast(group))
+			// skipnull1: the crash read +0x3C (InterpGroupInst.Group) of a
+			// null group instance - a Matinee with an empty slot is never
+			// given to the game's skip
+			if (!group)
+				return true;
+			if (!IsUsableObjectFast(group))
 				continue;
 			AActor* const actor = group->GroupActor;
 			if (actor && IsUsableObjectFast(actor)
@@ -67038,8 +67582,19 @@ namespace AliceCoop
 			{
 				return true;
 			}
+			// skipnull1 (13.11 13:09:38 client crash in the game's skip,
+			// a read at 0x3C of null): the Elite Card Guard spawner's
+			// Matinee was skipped before its guard existed here (the
+			// spawn waits until the joining Alice is with the host) - a
+			// group without its actor. The game's own skip is not used on
+			// such a Matinee; it is played to its end instead.
+			if (!actor && group->Group && IsUsableObjectFast(group->Group)
+				&& !group->Group->IsA(UInterpGroupDirector::StaticClass()))
+				return true;
 		}
-		return false;
+		// skipnull1: an enemy spawner prefab's Matinee is one too, even
+		// before its groups are filled
+		return ContainsCaseInsensitive(ObjectName(action), "_Spawner_Seq");
 	}
 
 	// skipfast1 (31.10 15:26): jumping the Madcap spawn Matinee to its end
@@ -67167,10 +67722,17 @@ namespace AliceCoop
 				"Function AliceGame.AlicePlayerController.TryToCancelMatinee");
 		AAlicePlayerController* const controller = g_State.AlicePlayerController;
 		ReleaseHeldSpawnFactories("remote skip");
-		if (MatineeDrivesEnemies(action) && JumpMatineeToEnd(action))
+		const bool drivesEnemies = MatineeDrivesEnemies(action);
+		if (drivesEnemies && JumpMatineeToEnd(action))
 		{
 			Log("CUTSCENESKIP the Matinee drives enemies: jumped to its end key="
 				+ SharedWorldKeyText(key) + '.');
+		}
+		else if (drivesEnemies)
+		{
+			// skipnull1: never the game's skip on such a Matinee
+			Log("CUTSCENESKIP the Matinee drives enemies but could not be jumped: left to play key="
+				+ SharedWorldKeyText(key) + " (skipnull1).");
 		}
 		else if (cancel && controller)
 		{
@@ -67280,6 +67842,7 @@ namespace AliceCoop
 
 	void TickSharedCutsceneSkip()
 	{
+		TickDelayedBinkStops(); // binkstop2
 		if (g_joinSkipCandidateKey != 0)
 		{
 			const auto at = Clock::now();
@@ -67394,7 +67957,20 @@ namespace AliceCoop
 				&& now - pending.receivedAt < std::chrono::seconds(8))
 			{
 				const AAlicePlayerController* const waitingController = g_State.AlicePlayerController;
-				if (waitingController && waitingController->bCinematicMode)
+				// joincine1 (13.11 13:15:37): right after a join the host's
+				// earlier skip of the Elite Card Guard intro started that
+				// spawner Matinee here (its factory spawned a guard of this
+				// game's own). A joining client never starts a cutscene just
+				// to skip it: it is not needed there.
+				const bool joining = g_config.role == Role::Client
+					&& g_joinTeleportArmedAt != Clock::time_point{};
+				if (joining && !pending.forced)
+				{
+					pending.forced = true;
+					Log("CUTSCENESKIP the skipped cutscene key=" + SharedWorldKeyText(pending.key)
+						+ " is not started here: this Alice is still joining the host (joincine1).");
+				}
+				else if (waitingController && waitingController->bCinematicMode)
 				{
 					pending.forced = true;
 					const bool started = ForceEmergencyCutscene(pending.key, "remote-skip-preload");
@@ -67690,12 +68266,24 @@ namespace AliceCoop
 			&& key != 0
 			// A pig snout's reward Matinee stays on this screen only.
 			&& !SnoutCutsceneNow()
-			&& (!PrivateLoadCutsceneNow() || restartCutscene);
+			&& (!PrivateLoadCutsceneNow() || restartCutscene)
+			// joincine1 (13.11 13:15:37): the map's start cutscene, started
+			// for the client still standing at the start after a join,
+			// held the shared barrier - the host was pulled to the start
+			// and fell through its unloaded floor. While this Alice is
+			// joining, a cutscene here is this game's own.
+			&& !(g_config.role == Role::Client && g_joinTeleportArmedAt != Clock::time_point{});
 		if (actor->IsA(ACameraActor::StaticClass()) && controllerCinematic && key != 0)
 		{
 			NoteWorldForCutscenes();
 			if (g_config.role == Role::Client && !g_config.localMirror
-				&& g_connected && PrivateLoadCutsceneNow()
+				&& g_connected
+				// jointp5 (13.11 12:18:30): the map's start cutscene
+				// (West_01_S Interp_2) played for the client who had just
+				// joined - not right at the load, so not skipped. Until
+				// this Alice is brought to the host, any new cutscene is a
+				// candidate (skipped when the host is not in one).
+				&& (PrivateLoadCutsceneNow() || g_joinTeleportArmedAt != Clock::time_point{})
 				&& g_joinRequestedAt != Clock::time_point{}
 				&& Clock::now() - g_joinRequestedAt < std::chrono::seconds(60)
 				&& g_joinSkipCandidateKey == 0
@@ -68544,6 +69132,15 @@ namespace AliceCoop
 			DiagLogRecentCrumbs("cleanup list had a null entry", 2000.0, 60);
 		}
 		ScrubEmitterPool();
+		// jointp8 (13.11 13:46:39-43: West_04 - the arena floor - was taken
+		// off every 2 s by this game's own level script while the joined
+		// client stood in the arena; restored only after the engine tick,
+		// the floor went away for a frame and the first Card Guard was lost
+		// with it): the host's levels are also kept right before the
+		// engine's tick, so its streaming never sees them switched off.
+		if (g_config.enabled && g_config.role == Role::Client && !WorldTransitionActive()
+			&& !LeavingWorld() && g_currentWorld && IsLiveUObject(g_currentWorld))
+			TickJoinStreamKeep();
 		// Everything the engine does from here until AliceCoop::Tick is
 		// "inside engine.tick" in the crash trail.
 		DiagBegin("engine.tick", reinterpret_cast<const void*>(engineLoop),
@@ -70984,6 +71581,7 @@ namespace AliceCoop
 			since = now;
 			haveSpot = false;
 			holds = 0;
+			g_loadHoldRespot = false; // jointp7: not from the old world
 		}
 		if (!g_config.enabled || now - since > std::chrono::seconds(12)
 			|| _stricmp(g_currentMap.c_str(), "AliceEntry") == 0
@@ -70994,6 +71592,19 @@ namespace AliceCoop
 		AAlicePlayerController* const pc = g_State.AlicePlayerController;
 		if (pc && IsUsableObjectFast(pc) && pc->bCinematicMode)
 			return;
+		// jointp7 (13.11 12:46:34-37): the join's teleport to the host (the
+		// arena lies 660 units below the map's start) looked like a fall
+		// through the floor here, and Alice was put back at the start three
+		// times before the second teleport. A teleport's destination is the
+		// new start spot.
+		if (g_loadHoldRespot)
+		{
+			g_loadHoldRespot = false;
+			spot = g_loadHoldRespotAt;
+			haveSpot = true;
+			holds = 0;
+			return;
+		}
 		if (!haveSpot)
 		{
 			if (static_cast<int>(localPawn->Physics) != 2)
@@ -71229,8 +71840,42 @@ namespace AliceCoop
 					std::string address = g_config.serverAddress;
 					for (char& c : address)
 						c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-					const bool loopback = address.empty() || address == "localhost"
+					bool loopback = address.empty() || address == "localhost"
 						|| address.rfind("127.", 0) == 0 || address == "::1";
+					// samepc1 (13.11 11:23, Radmin address of this very PC):
+					// the relay address was not 127.x, so the client saved like
+					// a client on its own PC - into the SAME Documents profile
+					// as the host. Its join (chapter start) overwrote the host's
+					// checkpoint, and the restart after the join put BOTH
+					// players at the map's start. An address that belongs to
+					// this PC (a socket can be bound to it) is this PC.
+					static int ownAddress = -1;
+					if (!loopback && ownAddress < 0)
+					{
+						ownAddress = 0;
+						sockaddr_in local{};
+						local.sin_family = AF_INET;
+						local.sin_port = 0;
+						if (InetPtonA(AF_INET, address.c_str(), &local.sin_addr) == 1)
+						{
+							WSADATA winsock{};
+							const bool started = WSAStartup(MAKEWORD(2, 2), &winsock) == 0;
+							const SOCKET probe = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+							if (probe != INVALID_SOCKET)
+							{
+								if (bind(probe, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == 0)
+									ownAddress = 1;
+								closesocket(probe);
+							}
+							if (started)
+								WSACleanup();
+						}
+						Log(std::string("SAVENATIVE relay address ") + g_config.serverAddress
+							+ (ownAddress ? " belongs to this PC: the host runs here too (samepc1)."
+								: " is another PC (samepc1)."));
+					}
+					if (ownAddress == 1)
+						loopback = true;
 					mode = loopback ? 1 : 0;
 				}
 			}
@@ -71251,6 +71896,22 @@ namespace AliceCoop
 		const std::filesystem::path source(originalPath);
 		redirectedPath = (sandboxDirectory / source.filename()).wstring();
 		return true;
+	}
+
+	// trailfront1 (13.11 12:53:16: a crash 13 s after the start, during the
+	// startup movies, left no crash trail): the crash reporter is installed
+	// after this mod and its handler never returns, so ours stood behind it
+	// until the first engine tick moved it (about 20 s in). Now it is moved
+	// in front as soon as the reporter is in.
+	void MoveCrashTrailHandlerToFront()
+	{
+		if (!g_config.enabled || !g_diagTrailEnabled || !g_diagTrailPath[0])
+			return;
+		if (g_diagVectoredHandler)
+			RemoveVectoredExceptionHandler(g_diagVectoredHandler);
+		g_diagVectoredHandler = AddVectoredExceptionHandler(1, DiagVectoredHandler);
+		Log(std::string("DIAG crash trail handler in front of the crash reporter from the start: ")
+			+ (g_diagVectoredHandler ? "yes" : "FAILED") + " (trailfront1).");
 	}
 
 	void Initialize()
@@ -71315,7 +71976,7 @@ namespace AliceCoop
 			// Both logs must show the same stamp: a host and a client built
 			// from different sources silently drop each other's new events.
 			Log(std::string("BUILD stamp=") + __DATE__ + " " + __TIME__
-				+ ", features=enemyspawn,sharedtouch,netlog2,hive2,teeth3,pause11,hint3,board6,wake6,leech6,worldgen1,poster1,uitrace3,snout5,hair2,spawn3,drivefail4,leave1,ea1,pause12,shotend1,hairrel1,teapot3,settrace1,leave2,pause14,hairdiag1,jointp1,flower2,bomb2,seqev2,los1,bomb3,dress1,save1,ears1,hairpreset1,bomb4,dlcvar1,wpnlight2,trailerhud1,blackscreen2,nosync1,dlclight3,flower3,ears2,hairpreset2,bombfall1,dlcfx1,trail2,freecam2,joinview1,sessionhost1,savefwd1,autojoinstale1,savecheck1,flower4,teapotend1,ears3,hairauto1,icons1,earcrash1,trailfix2,losrepeat1,hostexit1,flower5,hairsettle2,ears4,statue1,sethidden2,haircode1,trailcode1,retirefps1,earphys1,shotleft1,hairshape3,trailtick3,shotretire2,earphys2,pepperdlc2,hostmenu2,hostgone1,earhead3,hairshape4,destroydirect1,hairpreset4,enemyshield1,aggrowake1,spectate1,hintdone1,bolterdiag1,shadowdiag1,shieldconst2,armour1,clothfit1,spectate2,enemyhidden1,platehit1,spectate3,platehit2,hitprobe2,clothdress2,umbrella2,damageable1,aiwake2,stickytarget1,npcshot3,sharedshots2,hostpawnpause1,shieldhit5,enemyrec1,ruinsticky1,shieldreact2,noretarget1,enemyfx2,ruinfocus2,jelly1,stall2,pickupname1,handover1,clientpause1,spawnhold1,decoy1off,brainoff1,cutscenehold1,shotdeflect2,loopfx1,ownanim4log,aibroken1,release2,staleaim1,shotkey1,skipjump1,shotcourse2,shotfx1,deathfix1,deathanim3,focus2,aliceshotdiag3,kynapsediag1,animsync1,deathfx1,aliceshotdiag4,deathfx2,aliceshotdiag5,deathanim4,fxguard1,lockaim1,slide1,interphold1,deathanim5,posesmooth1,interpstuck3,animtime2,skipfast1,treediag3,hintpause1,branch1,posesmooth2,midaction1,deathfx3,treediag2,posestep1,interpstuck4,rootopt2,flowerspent1,brainoff2,interpstuck5,trace2,replayloop1,readycheck2,nosolowarn1,frozen1,branch2,restart1,icewake1,ruinghost1,restartcrash1,cutsceneonce1,restart2,restart3,readycheck3,readycheck4,spectatecam1,joinskip1,autojoin2,autojoin3,londonhair1,hostfps1,londonbow1,londonbow2,londonbow3,proxyfreeze1,fpsfade1,fpsfade2,fpsfade3,spectatecine3,pausehold1,autojoin4,autojoin5,autojoin6,autojoin7,savekeep2,restartrejoin1,spawnsettle1,cutsceneautojoin2,skipqueue1,spectatecine4,hinthide1,hinthide2,hinthide3,hinthide4,hintcrash1,pausefocus1,pausefocus2,pausefast1,streamsync1,streamsync2,interpsync1,interpsync2,archguard1,archguard2,archguard3,archfix1,londonproxy1,loadhold1,chapterdiag1,chapterdiag2,startstate1,enginestate1,enginestate2,freshchapter1,haircarry2,haircarry3,leaveclear1,spectatesmooth1,shotowner1,dupresolve1,londonclose1,mapleave1,cinediag1,hairroot1,skipwait1,londonhairdup1,hairwarm1,spectatecast1,spectatecast2,spectatecast3,skipforce1,skipload1,spectateoff1,spectatepause1,hairskel1,hairown1,skipepoch1,binkskip1,hairwind1,hairpatch1,hairpatch2,hairsubstep1,spectatelondon1,spectatewhy1,hairrespawn1,haircollide1,hairflags1,animsets1,animsets2,giantsync1,giantwalk1,giantwalk2,giantwalk3,giantrestart1,giantrestart2,giantrestart3,giantrestart4,giantrestart5,giantrestart6,giantdress1,giantanim1,giantanim2,hairrespawn2,hairdump1,hairair1,hairstep1,hairstiff1,giantstomp2,giantstomp1,giantcrowd1,giantfloor1,giantfloor2,crowdsync1,crowdsync2,crowdsync3,crowdsync4,crowdsync5,crowdsync6,dressfast1,londonhairphys1,enemyrecsafe1,spectatecine1,hairrec1,hairsync1,hairsync2,hairrec2,proxyleave1,proxyleave2,enemyreset1,savenative1,menucursor1,fovtunnel1,londontpose1,platesync1,leversync1,sphinxcrash1,hitfxguard1,seqparent1,londontpose2,vtablediag1,bowfly1,platesync2,platesync3,catsync1,chesswatch1,chesswatch2,chesswatch3,spawndiag1,deadstop1,chesswatch4,jumppad1,stunfly1,jumppad2,hysteriacopy1,chesswatch5,watchsize1,enemyrectree1,projcauser1,stunhit1,flyreact1,copycollide1,ruinstun1,flyreact2,shotassist1,grabguard1,grabguard2,grabguard3,grabsync1,guardstop1,stunhit2,grabrescue1,novhysteria1,ruinknock1,meleeassist1,meleefx1,spawndup1,codedump1,recname1,looploop1,deathfx4,bloodfx1,minigame1,minigamediag1,rollshare1,rollwatch2,rollwatch3,watchicon1,rollcannon1,cannonsync2,restartcine1,restartcine2,shadowproxy1,safefind1,leverlock1,archproxy1,grabcam1,grabrec1,archfix2,grabcam2,spawndup2,fxguard2,skipblack1,enemykey1,enemyanimset1,shotboom1,platewake1,grabcam3,checkpointshare1,skipblack2,platewake2,curveshot1,locosync1,enemyemit1,plateanim1,headwake1,platedead1,locktarget1,slotguard1,plateanim2,tankbrain1,highaddr1,highaddr2,highaddr3,checkpointshare2,leavesafe1,blockshare1,blockwatch1,padhold1,paddoor1,paddoor2,blockreset1,blockreset2,padmech1,fxguard3,crabguard1,musicwatch1,crabguard2,musicwatch2,spawnpick1,crabguard3,branchhold1,musicwatch3,crabflick1,perf1,crabhost1,musicclick1,musicswf1,perf2,musicflash1,crabwalk1,stalestop1,spawnpick2,restartsync1,continue1,continue2,continue3,perf3,crabflick2,hostmenu3,musicleave1,visualshield1,continue4,swfdump1,perf4,swfdump2,joinwait1,branchhold2,shootshare1,sololeave1,continue5,crabstun1,touchonce1,exitcrash2,swfdump3,continue6,shootshare2,shootshare3,joinskip2,solojoin1,shootwatch1,shoothit1,shootshare4,shoothit2,shootshare5,shootcard1,shoothit3,shootshare6,shootfind1,shootshare7,solojoin2,shootshare8,shootmirror1,shootstart1,shootcard2,shootskip1,shootmirror2,shootstart2,shootshot2,shootcollide1,shootdeath1,soloregrace1,shootgun3,shoothit4,shootenemy1,shootsync1,shootpause1,shootpause2,shootnofire1,shootsticky1,shootsmooth1,shootsmooth2,shootcoop1,shootghost1,shootghost2,shootghost3,shootmirror3,shootghost4,shootenemy2,shootcollide2,shootghost5,shootanim1,shoothp1,shootghost6,shoothp2,shootbump1,shootsmooth3,shootexit1,shootpause3,shootcollide3,shoothp3,shootexit2,asylumbald1,asylumlight1,asylumlight2,asylumbald2,asylumproxy1,logsoff1,cinedouble1,cinedouble2,cinedouble3,cineskip2,enemyfree1,chasehit1,chaselaugh1,chaseend1,chasepose1,sphinxdump1,sphinxdump2,sphinxlaugh1,chasehit2,chasepush1,chasepush2,joinrestart1,chasepush3,chasehit3,chaselaugh2,chaselaugh3,chasepush4,chaselaugh4,spawnrestart1,skipecho2,immortal1,chaseknock1,spawnheld1,spawnheld2,joinrestart2,enemyfree2,sphinxdump3,dumpsoff1,fallrelease1,loopbase1,ruinshare1,fallhold1,streamkeep1,soloclient1,spawnforce1,joinlatest1,joinunpause1,cineinput1,padmech2, worldEvent="
+				+ ", features=enemyspawn,sharedtouch,netlog2,hive2,teeth3,pause11,hint3,board6,wake6,leech6,worldgen1,poster1,uitrace3,snout5,hair2,spawn3,drivefail4,leave1,ea1,pause12,shotend1,hairrel1,teapot3,settrace1,leave2,pause14,hairdiag1,jointp1,flower2,bomb2,seqev2,los1,bomb3,dress1,save1,ears1,hairpreset1,bomb4,dlcvar1,wpnlight2,trailerhud1,blackscreen2,nosync1,dlclight3,flower3,ears2,hairpreset2,bombfall1,dlcfx1,trail2,freecam2,joinview1,sessionhost1,savefwd1,autojoinstale1,savecheck1,flower4,teapotend1,ears3,hairauto1,icons1,earcrash1,trailfix2,losrepeat1,hostexit1,flower5,hairsettle2,ears4,statue1,sethidden2,haircode1,trailcode1,retirefps1,earphys1,shotleft1,hairshape3,trailtick3,shotretire2,earphys2,pepperdlc2,hostmenu2,hostgone1,earhead3,hairshape4,destroydirect1,hairpreset4,enemyshield1,aggrowake1,spectate1,hintdone1,bolterdiag1,shadowdiag1,shieldconst2,armour1,clothfit1,spectate2,enemyhidden1,platehit1,spectate3,platehit2,hitprobe2,clothdress2,umbrella2,damageable1,aiwake2,stickytarget1,npcshot3,sharedshots2,hostpawnpause1,shieldhit5,enemyrec1,ruinsticky1,shieldreact2,noretarget1,enemyfx2,ruinfocus2,jelly1,stall2,pickupname1,handover1,clientpause1,spawnhold1,decoy1off,brainoff1,cutscenehold1,shotdeflect2,loopfx1,ownanim4log,aibroken1,release2,staleaim1,shotkey1,skipjump1,shotcourse2,shotfx1,deathfix1,deathanim3,focus2,aliceshotdiag3,kynapsediag1,animsync1,deathfx1,aliceshotdiag4,deathfx2,aliceshotdiag5,deathanim4,fxguard1,lockaim1,slide1,interphold1,deathanim5,posesmooth1,interpstuck3,animtime2,skipfast1,treediag3,hintpause1,branch1,posesmooth2,midaction1,deathfx3,treediag2,posestep1,interpstuck4,rootopt2,flowerspent1,brainoff2,interpstuck5,trace2,replayloop1,readycheck2,nosolowarn1,frozen1,branch2,restart1,icewake1,ruinghost1,restartcrash1,cutsceneonce1,restart2,restart3,readycheck3,readycheck4,spectatecam1,joinskip1,autojoin2,autojoin3,londonhair1,hostfps1,londonbow1,londonbow2,londonbow3,proxyfreeze1,fpsfade1,fpsfade2,fpsfade3,spectatecine3,pausehold1,autojoin4,autojoin5,autojoin6,autojoin7,savekeep2,restartrejoin1,spawnsettle1,cutsceneautojoin2,skipqueue1,spectatecine4,hinthide1,hinthide2,hinthide3,hinthide4,hintcrash1,pausefocus1,pausefocus2,pausefast1,streamsync1,streamsync2,interpsync1,interpsync2,archguard1,archguard2,archguard3,archfix1,londonproxy1,loadhold1,chapterdiag1,chapterdiag2,startstate1,enginestate1,enginestate2,freshchapter1,haircarry2,haircarry3,leaveclear1,spectatesmooth1,shotowner1,dupresolve1,londonclose1,mapleave1,cinediag1,hairroot1,skipwait1,londonhairdup1,hairwarm1,spectatecast1,spectatecast2,spectatecast3,skipforce1,skipload1,spectateoff1,spectatepause1,hairskel1,hairown1,skipepoch1,binkskip1,hairwind1,hairpatch1,hairpatch2,hairsubstep1,spectatelondon1,spectatewhy1,hairrespawn1,haircollide1,hairflags1,animsets1,animsets2,giantsync1,giantwalk1,giantwalk2,giantwalk3,giantrestart1,giantrestart2,giantrestart3,giantrestart4,giantrestart5,giantrestart6,giantdress1,giantanim1,giantanim2,hairrespawn2,hairdump1,hairair1,hairstep1,hairstiff1,giantstomp2,giantstomp1,giantcrowd1,giantfloor1,giantfloor2,crowdsync1,crowdsync2,crowdsync3,crowdsync4,crowdsync5,crowdsync6,dressfast1,londonhairphys1,enemyrecsafe1,spectatecine1,hairrec1,hairsync1,hairsync2,hairrec2,proxyleave1,proxyleave2,enemyreset1,savenative1,menucursor1,fovtunnel1,londontpose1,platesync1,leversync1,sphinxcrash1,hitfxguard1,seqparent1,londontpose2,vtablediag1,bowfly1,platesync2,platesync3,catsync1,chesswatch1,chesswatch2,chesswatch3,spawndiag1,deadstop1,chesswatch4,jumppad1,stunfly1,jumppad2,hysteriacopy1,chesswatch5,watchsize1,enemyrectree1,projcauser1,stunhit1,flyreact1,copycollide1,ruinstun1,flyreact2,shotassist1,grabguard1,grabguard2,grabguard3,grabsync1,guardstop1,stunhit2,grabrescue1,novhysteria1,ruinknock1,meleeassist1,meleefx1,spawndup1,codedump1,recname1,looploop1,deathfx4,bloodfx1,minigame1,minigamediag1,rollshare1,rollwatch2,rollwatch3,watchicon1,rollcannon1,cannonsync2,restartcine1,restartcine2,shadowproxy1,safefind1,leverlock1,archproxy1,grabcam1,grabrec1,archfix2,grabcam2,spawndup2,fxguard2,skipblack1,enemykey1,enemyanimset1,shotboom1,platewake1,grabcam3,checkpointshare1,skipblack2,platewake2,curveshot1,locosync1,enemyemit1,plateanim1,headwake1,platedead1,locktarget1,slotguard1,plateanim2,tankbrain1,highaddr1,highaddr2,highaddr3,checkpointshare2,leavesafe1,blockshare1,blockwatch1,padhold1,paddoor1,paddoor2,blockreset1,blockreset2,padmech1,fxguard3,crabguard1,musicwatch1,crabguard2,musicwatch2,spawnpick1,crabguard3,branchhold1,musicwatch3,crabflick1,perf1,crabhost1,musicclick1,musicswf1,perf2,musicflash1,crabwalk1,stalestop1,spawnpick2,restartsync1,continue1,continue2,continue3,perf3,crabflick2,hostmenu3,musicleave1,visualshield1,continue4,swfdump1,perf4,swfdump2,joinwait1,branchhold2,shootshare1,sololeave1,continue5,crabstun1,touchonce1,exitcrash2,swfdump3,continue6,shootshare2,shootshare3,joinskip2,solojoin1,shootwatch1,shoothit1,shootshare4,shoothit2,shootshare5,shootcard1,shoothit3,shootshare6,shootfind1,shootshare7,solojoin2,shootshare8,shootmirror1,shootstart1,shootcard2,shootskip1,shootmirror2,shootstart2,shootshot2,shootcollide1,shootdeath1,soloregrace1,shootgun3,shoothit4,shootenemy1,shootsync1,shootpause1,shootpause2,shootnofire1,shootsticky1,shootsmooth1,shootsmooth2,shootcoop1,shootghost1,shootghost2,shootghost3,shootmirror3,shootghost4,shootenemy2,shootcollide2,shootghost5,shootanim1,shoothp1,shootghost6,shoothp2,shootbump1,shootsmooth3,shootexit1,shootpause3,shootcollide3,shoothp3,shootexit2,asylumbald1,asylumlight1,asylumlight2,asylumbald2,asylumproxy1,logsoff1,cinedouble1,cinedouble2,cinedouble3,cineskip2,enemyfree1,chasehit1,chaselaugh1,chaseend1,chasepose1,sphinxdump1,sphinxdump2,sphinxlaugh1,chasehit2,chasepush1,chasepush2,joinrestart1,chasepush3,chasehit3,chaselaugh2,chaselaugh3,chasepush4,chaselaugh4,spawnrestart1,skipecho2,immortal1,chaseknock1,spawnheld1,spawnheld2,joinrestart2,enemyfree2,sphinxdump3,dumpsoff1,fallrelease1,loopbase1,ruinshare1,fallhold1,streamkeep1,soloclient1,spawnforce1,joinlatest1,joinunpause1,cineinput1,padmech2,samepc1,joinsave1,guardread1,joinlatest2,jointp3,jointp4,jointp5,jointp6,jointp7,balancefree1,binkstop2,trailfront1,spawnjoin1,skipnull1,joincine1,joincine2,spawnjoin2,spawnjoin3,jointp8,spawnercine1,bindkeep1,registrydiag1,spawnjoin4,spawnjoin5,spawnjoin6,teapotboom1, worldEvent="
 				+ std::to_string(sizeof(SharedWorldEventPayload)) + '.');
 			LogCrashSiteCode(); // codedump1
 			FindDuplicateObjectEx();
@@ -71797,6 +72458,9 @@ namespace AliceCoop
 			if (g_joinRestartPending)
 				g_joinRestartArmedAt = Clock::now(); // joinrestart1
 			g_joinLoadedAt = Clock::now(); // joinlatest1
+			g_joinTeleportArmedAt = Clock::now(); // jointp3
+			g_joinTeleportTries = 0;
+			g_joinStreamFollowUntil = Clock::now() + std::chrono::seconds(60); // jointp4
 		}
 		// joinrestart1: 4 s after the join, once this Alice stands in the
 		// host's map, the group checkpoint restart (both games reload their
@@ -71811,7 +72475,10 @@ namespace AliceCoop
 			g_joinRestartPending = false;
 			g_joinRestartArmedAt = {};
 			Log("SESSIONJOIN the host's checkpoint was unknown (Continue from the menu): "
-				"restarting both games from their checkpoint so the level script matches (joinrestart1).");
+				"no restart (it reloads the checkpoint in memory, not the host's) - this Alice goes to the host (jointp3).");
+		}
+		if (false)
+		{
 			// joinrestart2 (12.11 19:32:46-49, Continue at the Armored Card
 			// Guard checkpoint): this game's restart loads ITS checkpoint -
 			// and right after the join (LoadChapter 41) the game had saved
@@ -71847,10 +72514,153 @@ namespace AliceCoop
 						+ " (joinrestart2).");
 				}
 			}
-			// Only asked of the host: its restart command then restarts this
-			// game too (this game did not restart by itself, so it is not
-			// marked as a local restart).
-			RequestClientCheckpointRestart("join into a continued game (joinrestart1)");
+			// joinsave1 (13.11 11:21-11:23, two PCs, Armored Card Guard
+			// arena): no host file here - this game's restart loaded its own
+			// checkpoint (the chapter start the join had just saved) and
+			// the client stood at the map's start, the host in the arena.
+			// The host's two save files are fetched over the network first
+			// (as the menu's save sync does); the restart then loads the
+			// host's checkpoint here too.
+			bool tookOver = false;
+			{
+				std::filesystem::path original;
+				{
+					std::lock_guard<std::mutex> lock(g_observedSavePathMutex);
+					original = g_originalClientSavePaths[SaveFileIndex(SaveSyncFileKind::Checkpoint)];
+				}
+				std::wstring redirected;
+				std::error_code existsError;
+				tookOver = !original.empty() && TryRedirectClientSave(original.c_str(), redirected)
+					&& !redirected.empty() && std::filesystem::is_regular_file(original, existsError);
+			}
+			if (!tookOver && HaveOriginalClientSaveTargets()
+				&& g_requestedSaveTransferId.load() == 0 && !g_saveSyncInProgress.load())
+			{
+				{
+					std::lock_guard<std::mutex> lock(g_observedSavePathMutex);
+					g_requestedClientSavePaths = g_originalClientSavePaths;
+					g_requestedClientProfileName = g_activeSaveProfileName;
+				}
+				std::uint32_t transferId = static_cast<std::uint32_t>(
+					GetTickCount64() ^ (static_cast<std::uint64_t>(GetCurrentProcessId()) << 12));
+				if (transferId == 0)
+					transferId = 1;
+				g_joinSaveSyncCommitted.store(false);
+				g_joinSaveSyncPending.store(true);
+				g_joinSaveSyncStartedAt = Clock::now();
+				g_requestedSaveTransferId.store(transferId, std::memory_order_release);
+				SetSaveSyncStatus("FETCHING HOST CHECKPOINT", true, 0);
+				Log("SESSIONJOIN fetching the host's save files before the restart (joinsave1).");
+			}
+			else
+			{
+				// Only asked of the host: its restart command then restarts
+				// this game too (this game did not restart by itself, so it is
+				// not marked as a local restart).
+				RequestClientCheckpointRestart("join into a continued game (joinrestart1)");
+			}
+		}
+		// joinsave1: the fetch ended (saved, failed or 30 s): the restart
+		if (g_joinSaveSyncPending.load() && g_config.role == Role::Client)
+		{
+			const bool ended = g_requestedSaveTransferId.load() == 0;
+			const bool late = Clock::now() - g_joinSaveSyncStartedAt > std::chrono::seconds(30);
+			if (ended || late || !g_connected)
+			{
+				g_joinSaveSyncPending.store(false);
+				if (late && !ended)
+					g_requestedSaveTransferId.store(0);
+				Log(std::string("SESSIONJOIN host save fetch ")
+					+ (g_joinSaveSyncCommitted.load() ? "saved here" : (late ? "timed out" : "failed"))
+					+ ": restarting both games from their checkpoint (joinsave1).");
+				if (g_connected && localPawn && localPawn->Health > 0
+					&& !WorldTransitionActive() && !LeavingWorld())
+				{
+					RequestClientCheckpointRestart("join into a continued game (joinsave1)");
+				}
+			}
+		}
+		// jointp3 (13.11 11:50-12:00, Armored Card Guard arena): a join loads
+		// the start of the host's map (the chapter list knows no finer
+		// checkpoint), and neither the restart nor the copied save brought
+		// the client further. 3 s after the join, while the host stands
+		// (not in a cutscene, not falling) more than 3000 units away on
+		// this map, this Alice is put next to the host - again every 3 s,
+		// at most 5 times (a floor that streams in late can drop her back).
+		if (g_joinTeleportArmedAt != Clock::time_point{} && g_config.role == Role::Client)
+		{
+			const auto now = Clock::now();
+			const auto sinceJoin = now - g_joinTeleportArmedAt;
+			if (sinceJoin > std::chrono::seconds(45) || g_joinTeleportTries >= 5 || !g_connected)
+			{
+				g_joinTeleportArmedAt = {};
+			}
+			else if (sinceJoin > std::chrono::seconds(3 + 3 * g_joinTeleportTries)
+				&& localPawn && localPawn->Health > 0 && g_State.bRealGameplay
+				&& !WorldTransitionActive() && !LeavingWorld() && !g_joinHostPending
+				&& g_remotePresentation.valid && !g_waitingCutsceneAction)
+			{
+				const PlayerStatePayload hostState = g_remotePresentation.state;
+				AAlicePlayerController* const pc = g_State.AlicePlayerController;
+				const bool localCinematic = pc && IsUsableObjectFast(pc) && pc->bCinematicMode;
+				const bool hostBusy = (hostState.flags & StateCinematic) != 0
+					|| hostState.physics == static_cast<std::uint8_t>(EPhysics::PHYS_Falling)
+					|| hostState.health <= 0;
+				const FVector hostLocation(hostState.location[0], hostState.location[1], hostState.location[2]);
+				const float distance = std::sqrt((hostLocation - localPawn->Location).SizeSquared());
+				if (_stricmp(hostState.mapName, g_currentMap.c_str()) != 0)
+				{
+					// not the host's map (yet)
+				}
+				else if (distance <= 3000.0f)
+				{
+					if (g_joinTeleportTries > 0)
+						Log("JOINTP this Alice is with the host (" + std::to_string(static_cast<int>(distance))
+							+ " units) (jointp3).");
+					g_joinTeleportArmedAt = {};
+					g_joinSettledAt = now; // spawnjoin1
+					// jointp6 (13.11 12:18:28: the host's checkpoint fired
+					// right after the join, but no save followed - the game
+					// kept the map's start as this Alice's checkpoint, and a
+					// death or restart put her back there): fired once more
+					// 2 s after she reached the host
+					if (g_joinCheckpointKey != 0)
+						g_joinCheckpointRefireAt = now + std::chrono::seconds(2);
+				}
+				else if (!localCinematic && !hostBusy && !JoinHostLevelsReady(sinceJoin))
+				{
+					// jointp4 (13.11 12:10:18): the first teleport came 5 s
+					// after the join, before the arena's levels (West_03_S,
+					// West_04...) were loaded here - she fell through and was
+					// held in the air until O. The teleport waits until every
+					// level the host shows is loaded and shown here (20 s at
+					// most).
+				}
+				else if (!localCinematic && !hostBusy)
+				{
+					++g_joinTeleportTries;
+					const bool moved = TeleportLocalPawnToHost(localPawn, hostState, "join: to the host", true);
+					Log("JOINTP the host is " + std::to_string(static_cast<int>(distance))
+						+ " units away after the join: teleport " + std::to_string(g_joinTeleportTries)
+						+ (moved ? " done" : " FAILED") + " (jointp3).");
+				}
+			}
+		}
+		if (g_joinCheckpointRefireAt != Clock::time_point{} && Clock::now() >= g_joinCheckpointRefireAt
+			&& g_config.role == Role::Client)
+		{
+			g_joinCheckpointRefireAt = {};
+			if (g_joinCheckpointKey != 0 && g_connected && localPawn && localPawn->Health > 0
+				&& !WorldTransitionActive() && !LeavingWorld())
+			{
+				SharedWorldEventPayload again{};
+				again.kind = static_cast<SharedWorldEventKind>(27);
+				again.entityKey = g_joinCheckpointKey;
+				again.flags = 1u | 4u;
+				Log("JOINTP the host's checkpoint is fired again here, now that this Alice is with the host (jointp6).");
+				OnRemoteSharedSeqEvent(again);
+			}
+			g_joinCheckpointKey = 0;
 		}
 		// shootexit1 (12.11 03:16:23 host crash leaving the ship game to the
 		// menu): while the world goes away under the ship game its actors are
@@ -72038,6 +72848,7 @@ namespace AliceCoop
 		LogChapterDiagAddresses(); // chapterdiag1
 		TickEngineStartState(); // startstate1
 		TickStreamLevelSync(); // streamsync1
+		TickJoinStreamKeep(); // jointp5
 		TickPeerArrival(); // joinlatest1 / joinunpause1
 		TickInterpStateSync(); // interpsync1
 		TickBalanceSync(); // platesync1

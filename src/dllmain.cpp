@@ -47,6 +47,7 @@ static void Init()
 	if (EnableCrashHandler)
 	{
 		CrashHandler::Install();
+		AliceCoop::MoveCrashTrailHandlerToFront(); // trailfront1
 	}
 
 	// Fixes

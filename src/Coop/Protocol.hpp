@@ -6,13 +6,14 @@
 
 namespace AliceCoopProtocol
 {
-	constexpr std::uint32_t Magic = 0x504F4341; // "ACOP" in little-endian byte order.
-	// Deliberately left at 29 even though a packet type was added. The relay
-	// server is built separately from its own copy of this header and checks
-	// this number on every datagram, so bumping it here quietly turns every
-	// packet into a malformed one until the relay is rebuilt too. The new type
-	// is purely additive - a build that does not know it simply ignores it.
-	constexpr std::uint16_t Version = 29;
+	// AliceFracturedMinds has its own protocol: "AFMC" instead of the
+	// original Alice Co-op's "ACOP", so this fork's game, relay server and
+	// Docwitson's never mistake each other's packets (a mixed setup is
+	// simply not connected). The relay server is built from this same header
+	// - rebuild AliceCoopServer.exe together with the mod after any change
+	// here.
+	constexpr std::uint32_t Magic = 0x434D4641; // "AFMC" in little-endian byte order.
+	constexpr std::uint16_t Version = 1;
 	constexpr std::uint16_t DefaultPort = 27018;
 	constexpr std::size_t MaxDatagramSize = 1024;
 	constexpr std::size_t MaxAnimationSequences = 12;

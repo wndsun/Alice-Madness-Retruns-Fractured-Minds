@@ -12,6 +12,8 @@
 #include <Windows.h>
 #include <DbgHelp.h>
 
+#include "GuardedRead.hpp"
+
 #pragma comment(lib, "Dbghelp.lib")
 
 namespace CrashHandler
@@ -718,6 +720,14 @@ namespace CrashHandler
 		}
 
 		if (!IsFatalCode(ep->ExceptionRecord->ExceptionCode))
+		{
+			return EXCEPTION_CONTINUE_SEARCH;
+		}
+
+		// guardread1: a guarded read of possibly freed memory - its own
+		// __except handles it
+		if (g_aliceGuardedReadDepth > 0
+			&& ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION)
 		{
 			return EXCEPTION_CONTINUE_SEARCH;
 		}
