@@ -8,6 +8,11 @@ If you or the client encounter a noticeable bug, try restarting the level. If th
 
 **Most importantly!** Both players should remain in the main menu until they are ready to connect. If you're the host, make sure the client has selected their save file at the beginning of the game and has entered the main menu. This ensures that both players connect at the same time.
 
+**If one player has the EA version and the other has the Steam version, I recommend the following:**
+- The player with the Steam version should always be the host.
+- The player with the EA version should always be the client.
+This is recommended to prevent synchronization issues and bugs.
+
 ### What should you do if you get stuck or the other player is far away?
 
 There is a teleportation system that allows you to teleport to your partner.
