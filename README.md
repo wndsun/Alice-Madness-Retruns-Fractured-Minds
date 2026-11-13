@@ -61,7 +61,7 @@ Full list: [CHANGELOG.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractu
 > The archive replaces `dinput8.dll` and `MadnessPatch.ini` - back them up and back up your saves.
 
 ## New Feature
-Free Camera: [docs/FreeCamera.md]()
+Free Camera: [docs/FreeCamera.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/docs/FreeCamera.md)
 
 ## Reporting bugs
 Logs are off by default. Set `Logs = 1` in `[Debug]` of `AliceCoop\AliceCoop.ini`, reproduce the problem and attach the files from `AliceCoop\logs` to an [issue](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/issues).
