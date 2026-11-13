@@ -4,7 +4,7 @@
   <img src="docs/media//spl01.png" width="1000" alt="AliceFracturedMinds">
 </p>
 
-My Twitter: [twitter](https://x.com/__WonderSun__)
+My Twitter: https://x.com/__WonderSun__
 
 Descriptions in other languages:
 Español: [README_SP](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/README_SP.md)
