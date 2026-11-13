@@ -6,7 +6,13 @@ Consiglio a entrambi i giocatori di connettersi contemporaneamente! Questo aiuta
 
 Se tu o il client riscontrate un bug evidente, provate a riavviare il livello. Se non funziona, tornate al menu principale e selezionate **Continue**.
 
-**La cosa più importante!** Entrambi i giocatori devono rimanere nel menu principale finché non sono pronti a connettersi. Se sei l'host, assicurati che il client abbia selezionato il proprio file di salvataggio all'avvio del gioco e sia entrato nel menu principale. Questo garantisce che entrambi i giocatori si connettano contemporaneamente.
+**La cosa più importante!** Entrambi i giocatori devono rimanere nel menu principale finché non sono pronti a connettersi. Se sei l'host, assicurati che il client abbia selezionato il proprio file di salvataggio all'inizio del gioco e sia entrato nel menu principale. Questo garantisce che entrambi i giocatori si connettano contemporaneamente.
+
+**Se un giocatore utilizza la versione EA e l'altro la versione Steam, consiglio quanto segue:**
+- Il giocatore che utilizza la versione Steam deve sempre essere l'host.
+- Il giocatore che utilizza la versione EA deve sempre essere il client.
+
+Questo è consigliato per evitare problemi di sincronizzazione e bug.
 
 ### Cosa fare se rimani bloccato o l'altro giocatore è troppo lontano?
 
@@ -21,7 +27,7 @@ Il teletrasporto può spesso risolvere questi problemi!
 
 Se riavviare il gioco o il livello non risolve i bug, prova prima a selezionare un capitolo diverso e poi torna al capitolo a cui vuoi effettivamente giocare.
 
-Inoltre, ricordati di eliminare i file presenti nella cartella `AliceCoop\client-saves` per rimuovere gli ultimi checkpoint salvati.
+Inoltre, ricordati di eliminare i file presenti nella cartella `AliceCoop\client-saves` per rimuovere gli ultimi checkpoint salvati. **Questa operazione deve essere eseguita dal client.**
 
 Se il gioco si blocca durante l'avvio o in determinati momenti della partita, prova ad avviarlo nuovamente.
 
@@ -29,7 +35,7 @@ Se il gioco si blocca durante l'avvio o in determinati momenti della partita, pr
 
 Non preoccuparti! Se l'host sta giocando nei panni di London Alice, chiedigli di avanzare un po' affinché il vestito possa sistemarsi automaticamente.
 
-Se questo non funziona, prova a scambiare i ruoli. Ad esempio, il client diventa l'host e l'host diventa il client. Questo dovrebbe risolvere il problema del vestito.
+La cosa più importante è che l'host utilizzi necessariamente la versione Steam.
 
 ### Consigli per l'host
 
@@ -51,6 +57,8 @@ Assicurati di svuotare regolarmente questa cartella, poiché l'accumulo di file 
 
 Tieni presente che questa mod potrebbe non funzionare sempre perfettamente. Durante il gioco potresti riscontrare bug, crash o altri problemi.
 
-Se hai domande o riscontri problemi, segnalali qui: https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/issues
+Se hai domande o riscontri problemi, segnalali qui:
+
+https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/issues
 
 **Buon divertimento!**
