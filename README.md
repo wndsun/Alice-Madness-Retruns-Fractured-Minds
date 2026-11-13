@@ -60,5 +60,8 @@ Full list: [CHANGELOG.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractu
 > The relay server has no authentication or encryption. Never forward its port (UDP 27018) to the Internet.
 > The archive replaces `dinput8.dll` and `MadnessPatch.ini` - back them up and back up your saves.
 
+## New Feature
+Free Camera: [docs/FreeCamera.md]()
+
 ## Reporting bugs
 Logs are off by default. Set `Logs = 1` in `[Debug]` of `AliceCoop\AliceCoop.ini`, reproduce the problem and attach the files from `AliceCoop\logs` to an [issue](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/issues).
