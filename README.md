@@ -40,7 +40,7 @@ Français: [docs/INSTALL_FR.md](https://github.com/wndsun/Alice-Madness-Retruns-
 
 Deutsch: [docs/INSTALL_GE.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/docs/INSTALL_GE.md)
 
-### What's new compared to Alice Co-op 0.1.0-alpha.1
+## What's new compared to Alice Co-op 0.1.0-alpha.1
 - In-game co-op menu (**M**): role, server address and port; the host can start the server from the menu. No external launcher needed.
 - Watching the host in the London chapters.
 - Synchronized Executioner chase: hits, knockback, laugh and end of the chase.
@@ -51,7 +51,7 @@ Deutsch: [docs/INSTALL_GE.md](https://github.com/wndsun/Alice-Madness-Retruns-Fr
 
 Full list: [CHANGELOG.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/CHANGELOG.md)
 
-### Requirements
+## Requirements
 - A legitimate PC copy of the game for each player (Steam or EA App). No game files are included.
 - Windows 10/11, Microsoft Visual C++ 2015-2022 Redistributable **x86**.
 - The same PC, a LAN, or a trusted VPN (e.g. Radmin VPN).
@@ -60,5 +60,5 @@ Full list: [CHANGELOG.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractu
 > The relay server has no authentication or encryption. Never forward its port (UDP 27018) to the Internet.
 > The archive replaces `dinput8.dll` and `MadnessPatch.ini` - back them up and back up your saves.
 
-### Reporting bugs
+## Reporting bugs
 Logs are off by default. Set `Logs = 1` in `[Debug]` of `AliceCoop\AliceCoop.ini`, reproduce the problem and attach the files from `AliceCoop\logs` to an [issue](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/issues).
