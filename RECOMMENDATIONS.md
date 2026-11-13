@@ -33,8 +33,7 @@ If the game crashes during startup or at certain points while playing, try launc
 ### What should you do if the client's dress is broken?
 
 Don't worry! If the host is playing as London Alice, ask them to move forward a little so that the dress can fix itself.
-
-If that doesn't work, try switching roles. For example, the client becomes the host, and the host becomes the client. This should resolve the dress issue.
+The most important thing is that the host must be using the Steam version.
 
 ### Advice for the Host
 
