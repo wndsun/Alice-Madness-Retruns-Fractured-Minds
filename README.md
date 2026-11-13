@@ -40,6 +40,21 @@ Français: [docs/INSTALL_FR.md](https://github.com/wndsun/Alice-Madness-Retruns-
 
 Deutsch: [docs/INSTALL_GE.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/docs/INSTALL_GE.md)
 
+## Recommendations
+English: [RECCOMENDATIONS.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/RECOMMENDATIONS.md)
+
+Русский: [RECCOMENDATIONS_RU.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/RECOMMENDATIONS_RU.md)
+
+日本語: [RECCOMENDATIONS_JP.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/RECOMMENDATIONS_JP.md)
+
+Español: [RECCOMENDATIONS_SP.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/RECOMMENDATIONS_SP.md)
+
+Italiano: [RECCOMENDATIONS_IT.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/RECOMMENDATIONS_IT.md)
+
+Français: [RECCOMENDATIONS_FR.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/RECOMMENDATIONS_FR.md)
+
+Deutsch: [RECCOMENDATIONS_GE.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/RECOMMENDATIONS_GE.md)
+
 ## What's new compared to Alice Co-op 0.1.0-alpha.1
 - In-game co-op menu (**M**): role, server address and port; the host can start the server from the menu. No external launcher needed.
 - Watching the host in the London chapters.
