@@ -262,6 +262,8 @@ namespace AliceCoop
 		const AliceCoopProtocol::SharedWorldEventPayload& event);
 	void TickStreamLevelSync();
 	void ResetEngineStartState(const char* why); // startstate1
+	void RestoreGiantSaveArchetype(const char* why); // giantsave1
+	void ObservedSavePathRest(const wchar_t* effectivePath); // giantsave1
 	void OnRemoteWeaponHitFx(
 		const AliceCoopProtocol::SharedWorldEventPayload& event,
 		AWorldInfo* world);
@@ -1333,6 +1335,19 @@ namespace AliceCoop
 		{
 			return g_currentMap + "#" + std::to_string(g_worldGeneration);
 		}
+		// breakrestart1 (13.11 19:30:35, giant section: a checkpoint
+		// restart keeps the world, so CurrentWorldTag stays the same). The
+		// shared breakables and the hive reveals kept their "already sent /
+		// already played" keys over the restart: what came back after it was
+		// broken by each game for itself (never sent again), and a path
+		// blocker revealed again in one game was "already played" in the
+		// other - hidden there, but still blocking (the invisible wall).
+		// Their own world tag also counts the restarts.
+		int g_restartGeneration = 0;
+		std::string BreakableWorldTag()
+		{
+			return CurrentWorldTag() + "." + std::to_string(g_restartGeneration);
+		}
 		// Set when the player leaves the level from the pause menu (back to
 		// the main menu, quit, load checkpoint): the mod's own world systems
 		// (pause, hints, boards, leech watch, teeth flights) stop touching
@@ -1768,6 +1783,52 @@ namespace AliceCoop
 		// second player to join (the only time the ready label is shown).
 		bool g_readyCheckJoinWait = false;
 		Clock::time_point g_joinRequestedAt{}; // joinskip1: last join by this client
+		std::string g_lastGameplayMap; // joincontinue1: the map this game was on before the menu
+		// giantleave1: the proxy that took the giant's animation sets / clips
+		const void* g_proxyGiantDressedFor = nullptr;
+		// joincontinue2 (13.11 19:32:17: the client quit the game, started
+		// it again and joined by hand - the map was not known any more, the
+		// chapter start was loaded and broke the giant section again). The
+		// map is kept in a file next to the saves, per role.
+		std::filesystem::path LastGameplayMapFile()
+		{
+			return std::filesystem::path(SystemHelper::GetModulePath()) / L"AliceCoop"
+				/ (g_config.role == Role::Host ? L"lastmap_host.txt" : L"lastmap_client.txt");
+		}
+		void SaveLastGameplayMap()
+		{
+			try
+			{
+				std::error_code ignored;
+				std::filesystem::create_directories(LastGameplayMapFile().parent_path(), ignored);
+				std::ofstream file(LastGameplayMapFile(), std::ios::trunc);
+				file << g_lastGameplayMap;
+			}
+			catch (...)
+			{
+			}
+		}
+		void LoadLastGameplayMapOnce()
+		{
+			static bool loaded = false;
+			if (loaded || !g_lastGameplayMap.empty())
+				return;
+			loaded = true;
+			try
+			{
+				std::ifstream file(LastGameplayMapFile());
+				std::string map;
+				if (file && std::getline(file, map) && !map.empty() && map.size() < 64)
+				{
+					g_lastGameplayMap = map;
+					Log("SESSIONJOIN this game was last on " + map + " (kept from before it was"
+						" started, joincontinue2).");
+				}
+			}
+			catch (...)
+			{
+			}
+		}
 		// hostfps1: the host is in first-person view (T) - from his camera
 		// broadcast; his Alice is not drawn here then (the client looks
 		// through his eyes and would see the inside of her head).
@@ -1881,6 +1942,13 @@ namespace AliceCoop
 		// then on
 		bool g_loadHoldRespot = false;
 		Clock::time_point g_joinSettledAt{}; // spawnjoin1: this Alice reached the host
+		Clock::time_point g_hostPeerArrivedAt{}; // cpjoin2: the other player came into this map
+		Clock::time_point g_lastCheckpointFiredAt{}; // breakmem1: a checkpoint event last fired on this map
+		// giantsave1: the checkpoint save the join makes is written as the giant Alice
+		Clock::time_point g_giantSaveHoldUntil{};
+		int g_giantSavePawnArch = -1;
+		int g_giantSaveGameArch = -1;
+		void* g_giantSavePawn = nullptr;
 		// spawnjoin4: the last time the host sent an enemy this game has none of
 		Clock::time_point g_clientHostEnemyMissedAt{};
 		Clock::time_point g_clientHostEnemyMissingSince{}; // spawnjoin5: start of that streak
@@ -7108,6 +7176,12 @@ namespace AliceCoop
 						}
 					}
 					g_mapBeforeWorldChange.clear();
+					if (!g_currentMap.empty() && _stricmp(g_currentMap.c_str(), "AliceEntry") != 0
+						&& g_lastGameplayMap != g_currentMap)
+					{
+						g_lastGameplayMap = g_currentMap; // joincontinue1
+						SaveLastGameplayMap(); // joincontinue2
+					}
 					Log("Active map=" + (g_currentMap.empty() ? std::string("<empty>") : g_currentMap) + '.');
 				}
 				g_nextMapRefresh = now + std::chrono::seconds(1);
@@ -8544,7 +8618,44 @@ namespace AliceCoop
 			g_joinHostLoadInvokedAt = Clock::now();
 			++g_joinHostAttemptCount;
 			SetJoinHostStatus("LOADING HOST CHECKPOINT...");
-			const bool invoked = NativeLoadChapter(
+			// joinfresh1 (13.11 18:06:37, client back from the menu, joining
+			// the host in the giant section by hand: chapter 44 came up from
+			// the last world's checkpoint - action flag 2 and its checkpoint
+			// object still set - in the first corridor, as the Wonderland
+			// Alice, and was then put next to the giant host). The join's
+			// chapter load gets the engine as a fresh start, as a chapter
+			// chosen in the list does.
+			// joincontinue1 (13.11 19:10:20, the client back from the menu
+			// on the host's map, the giant section: the chapter load put her
+			// in the first corridor as the Wonderland Alice, and nothing made
+			// her giant again). The game's own save of that map - written
+			// here while she played next to the host - is loaded instead,
+			// as Continue does (which gives the giant Alice correctly); the
+			// join then brings her to the host as usual.
+			bool continued = false;
+			LoadLastGameplayMapOnce(); // joincontinue2
+			if (!g_lastGameplayMap.empty()
+				&& _stricmp(g_lastGameplayMap.c_str(), hostMap.c_str()) == 0)
+			{
+				AAlicePlayerController* const menuPc = g_State.AlicePlayerController;
+				AAliceGameInfo* const game = menuPc && IsUsableObjectFast(menuPc) && menuPc->WorldInfo
+					&& menuPc->WorldInfo->Game && menuPc->WorldInfo->Game->IsA(AAliceGameInfo::StaticClass())
+					? reinterpret_cast<AAliceGameInfo*>(menuPc->WorldInfo->Game) : nullptr;
+				static UFunction* loadLast = nullptr;
+				if (!loadLast)
+					loadLast = FindFunctionSafe("Function AliceGame.AliceGameInfo.LoadLastCheckpointFromTitleMenu");
+				if (game && loadLast)
+				{
+					AAliceGameInfo_execLoadLastCheckpointFromTitleMenu_Params none{};
+					game->ProcessEvent(loadLast, &none, nullptr);
+					continued = true;
+					Log("SESSIONJOIN this game was on " + hostMap + " before the menu: its own last checkpoint"
+						" there is loaded as Continue does, not the chapter start (joincontinue1).");
+				}
+			}
+			if (!continued)
+				ResetEngineStartState("join: chapter load");
+			const bool invoked = continued || NativeLoadChapter(
 				manager,
 				static_cast<EChapterNameList>(checkpoint));
 			Log("SESSIONJOIN LoadChapter hostMap=" + hostMap
@@ -11063,16 +11174,18 @@ namespace AliceCoop
 			SharedWorldEventPayload event;
 			Clock::time_point until;
 			Clock::time_point nextTry{};
+			bool lateResolve = false; // breakmem1: not loaded here yet when it came
 		};
 		std::vector<PendingBreakableDestroy> g_pendingBreakableDestroys;
 
 		void SyncHiveMap()
 		{
-			if (g_hiveRevealMap == CurrentWorldTag())
+			if (g_hiveRevealMap == BreakableWorldTag())
 				return;
-			g_hiveRevealMap = CurrentWorldTag();
+			g_hiveRevealMap = BreakableWorldTag();
 			g_hiveRevealKeys.clear();
 			g_pendingBreakableDestroys.clear();
+			g_sentSharedBreakableKeys.clear(); // breakrestart1
 		}
 
 		// GameBreakableActor.uc: TakeDamage does nothing while bHidden (or for
@@ -11114,15 +11227,24 @@ namespace AliceCoop
 		void OnLocalBreakableInterpStarted(AActor* actor,
 			USeqAct_Interp* action, std::uint64_t key)
 		{
-			if (!g_config.enabled || g_config.localMirror || !g_connected
+			if (!g_config.enabled || g_config.localMirror
 				|| key == 0 || !actor
 				|| !actor->IsA(AGameBreakableActor::StaticClass()))
 			{
 				return;
 			}
 			SyncHiveMap();
+			// hivelocal1 (13.11 17:55:56, host after Continue: the reveal
+			// Matinees of the giant section had played here at the load,
+			// before the client was connected, so they were never noted; the
+			// joining client's own load sent the same reveals and they were
+			// started here a second time - the walls they raise came back,
+			// invisible, in the way of both). A reveal is noted even when
+			// nobody is connected.
 			if (!g_hiveRevealKeys.insert(key).second)
 				return; // already sent, or started here by the peer
+			if (!g_connected)
+				return;
 			SharedWorldEventPayload event{};
 			event.kind = kEventHiveReveal;
 			event.entityKey = key;
@@ -11266,10 +11388,13 @@ namespace AliceCoop
 			static Clock::time_point sendAt{};
 			static bool sent = true;
 			const auto now = Clock::now();
-			if (world != CurrentWorldTag())
+			if (world != BreakableWorldTag())
 			{
-				world = CurrentWorldTag();
-				sendAt = now + std::chrono::seconds(8);
+				// breakrestart1: a restart is counted from its click
+				const bool restart = !world.empty()
+					&& world.rfind(CurrentWorldTag() + ".", 0) == 0;
+				world = BreakableWorldTag();
+				sendAt = now + std::chrono::seconds(restart ? 12 : 8);
 				sent = false;
 				return;
 			}
@@ -11311,8 +11436,125 @@ namespace AliceCoop
 					+ " broken breakable(s) of this world to the other game (restartsync1).");
 		}
 
+		// breakmem1 (13.11 16:53:35, giant section: after the group restart
+		// the crowd spawner the save had broken stood again, invisible, and
+		// neither Alice could go on - this world came back without it,
+		// RESTARTSYNC found nothing to send). The breakables broken on this
+		// map are remembered for the session; after a restart those broken
+		// before the last checkpoint (or already broken when a world of this
+		// map began) are broken again.
+		std::string g_brokenMemoryMap;
+		std::unordered_map<std::uint64_t, Clock::time_point> g_brokenMemory;
+
+		void TickBreakableMemory()
+		{
+			static std::string world;
+			static Clock::time_point worldStart{};
+			static Clock::time_point nextScan{};
+			static bool restoreOn = false;
+			static std::unordered_set<std::uint64_t> attempted;
+			const auto now = Clock::now();
+			if (g_currentMap.empty() || _stricmp(g_currentMap.c_str(), "AliceEntry") == 0)
+				return;
+			if (_stricmp(g_brokenMemoryMap.c_str(), g_currentMap.c_str()) != 0)
+			{
+				g_brokenMemoryMap = g_currentMap;
+				g_brokenMemory.clear();
+				g_lastCheckpointFiredAt = {};
+			}
+			if (world != BreakableWorldTag())
+			{
+				const bool restart = !world.empty()
+					&& world.rfind(CurrentWorldTag() + ".", 0) == 0; // breakrestart1
+				world = BreakableWorldTag();
+				worldStart = restart ? now + std::chrono::seconds(4) : now;
+				nextScan = now + std::chrono::seconds(restart ? 14 : 10);
+				restoreOn = !g_brokenMemory.empty();
+				attempted.clear();
+				return;
+			}
+			if (now < nextScan || WorldTransitionActive() || LeavingWorld())
+				return;
+			nextScan = now + std::chrono::seconds(4);
+			const bool firstScan = now - worldStart < std::chrono::seconds(14);
+			TArray<UObject*>* objects = UObject::GObjObjects();
+			UClass* const breakableClass = AGameBreakableActor::StaticClass();
+			std::unordered_map<std::uint64_t, AGameBreakableActor*> standing;
+			for (int32_t index = 0; objects && breakableClass && index < objects->size(); ++index)
+			{
+				UObject* const object = objects->at(index);
+				if (!object || !object->IsA(breakableClass) || object->IsDefaultObject())
+					continue;
+				auto* const breakable = reinterpret_cast<AGameBreakableActor*>(object);
+				if (breakable->bDeleteMe || breakable->WorldInfo != g_currentWorld)
+					continue;
+				const std::uint64_t entityKey = WorldTraceStableKeyValue(object, WorldTraceKind::Breakable);
+				if (!entityKey)
+					continue;
+				if (BreakableIsBroken(breakable))
+				{
+					if (g_brokenMemory.find(entityKey) == g_brokenMemory.end())
+					{
+						// broken when this world began = part of its checkpoint
+						g_brokenMemory[entityKey] = firstScan ? Clock::time_point{} : now;
+					}
+				}
+				else if (restoreOn)
+				{
+					standing[entityKey] = breakable;
+				}
+			}
+			// streamed levels can come late: tried for 45 s of the world
+			if (!restoreOn)
+				return;
+			if (now - worldStart > std::chrono::seconds(45))
+			{
+				restoreOn = false;
+				return;
+			}
+			SyncHiveMap();
+			int count = 0;
+			for (const auto& [entityKey, brokenAt] : g_brokenMemory)
+			{
+				const auto it = standing.find(entityKey);
+				if (it == standing.end())
+					continue;
+				if (brokenAt != Clock::time_point{}
+					&& (g_lastCheckpointFiredAt == Clock::time_point{} || brokenAt > g_lastCheckpointFiredAt))
+				{
+					continue; // broken after the last checkpoint: rightly back
+				}
+				if (!attempted.insert(entityKey).second)
+					continue;
+				PendingBreakableDestroy entry{};
+				entry.event.kind = SharedWorldEventKind::BreakableDestroyed;
+				entry.event.originActorId = g_config.role == Role::Host ? 1u : 2u;
+				entry.event.entityKey = entityKey;
+				entry.event.flags = 0;
+				entry.event.hitLocation[0] = it->second->Location.X;
+				entry.event.hitLocation[1] = it->second->Location.Y;
+				entry.event.hitLocation[2] = it->second->Location.Z;
+				entry.until = now + std::chrono::seconds(3);
+				g_pendingBreakableDestroys.push_back(entry);
+				// the other game may be missing it too (its RESTARTSYNC went
+				// before this)
+				if (g_connected)
+				{
+					QueueSharedWorldEvent(entry.event);
+					g_sentSharedBreakableKeys.insert(entityKey);
+				}
+				++count;
+			}
+			if (count > 0)
+			{
+				Log("BREAKMEM " + std::to_string(count) + " breakable(s) broken before the checkpoint stood"
+					" again after the restart: broken again (breakmem1).");
+			}
+		}
+
 		void TickSharedBreakables()
 		{
+			TickBreakableMemory(); // breakmem1
 			if (g_pendingBreakableDestroys.empty())
 				return;
 			SyncHiveMap();
@@ -11324,8 +11566,23 @@ namespace AliceCoop
 			{
 				AGameBreakableActor* const breakable =
 					FindSharedBreakable(entry.event.entityKey, g_currentWorld);
+				if (!breakable && entry.lateResolve && now < entry.until)
+				{
+					g_pendingBreakableDestroys.push_back(entry); // breakmem1: its level still loading
+					continue;
+				}
 				if (!breakable || BreakableIsBroken(breakable))
 					continue;
+				if (entry.lateResolve)
+				{
+					// breakmem1: a state sync (join / restart), not a live
+					// hit - a hidden one is not waited for long
+					entry.lateResolve = false;
+					entry.until = (std::min)(entry.until, now + std::chrono::seconds(3));
+					Log("SHAREDBREAKABLE resolved late key=" + SharedWorldKeyText(entry.event.entityKey)
+						+ ", object=" + ObjectName(breakable) + ", hidden="
+						+ (breakable->bHidden ? "yes" : "no") + " (breakmem1).");
+				}
 				const bool timedOut = now >= entry.until;
 				if ((!breakable->bHidden && now >= entry.nextTry) || timedOut)
 				{
@@ -15844,9 +16101,25 @@ namespace AliceCoop
 					}
 					else
 					{
+						// breakmem1 (13.11 16:52:59, client joining: the host's
+						// 5 broken breakables came while their levels were
+						// still loading here and were dropped - the passage
+						// the host had broken stayed, invisible, in the way)
+						SyncHiveMap();
+						bool queued = false;
+						for (const PendingBreakableDestroy& pending : g_pendingBreakableDestroys)
+							queued = queued || pending.event.entityKey == event.entityKey;
+						if (!queued)
+						{
+							PendingBreakableDestroy entry{};
+							entry.event = event;
+							entry.until = Clock::now() + std::chrono::seconds(60);
+							entry.lateResolve = true;
+							g_pendingBreakableDestroys.push_back(entry);
+						}
 						Log("SHAREDBREAKABLE unresolved key="
 							+ SharedWorldKeyText(
-								event.entityKey) + '.');
+								event.entityKey) + ": kept until its level loads (breakmem1).");
 					}
 					continue;
 				}
@@ -23124,6 +23397,7 @@ namespace AliceCoop
 					if (lastKey)
 					{
 						g_lastCheckpointEventKey = lastKey; // joinlatest1
+						g_lastCheckpointFiredAt = Clock::now(); // breakmem1
 						g_lastCheckpointEventMap = g_currentMap;
 						g_lastCheckpointEventName = name;
 					}
@@ -23141,7 +23415,23 @@ namespace AliceCoop
 				{
 					const std::uint64_t shareKey = SequenceActionStableKey(event);
 					const auto replay = g_sharedSeqReplayUntil.find(shareKey);
-					if (shareKey && (replay == g_sharedSeqReplayUntil.end()
+					// cpjoin1 (13.11 15:06:55, giant section: the client, just
+					// loaded at the chapter start and teleported, fired
+					// Checkpoints.SeqEvent_RemoteEvent_5 of its own load; the
+					// host fired it too and from then on every restart put both
+					// Alices at the chapter start - giant, falling to death).
+					// A checkpoint this client fires while still joining is
+					// its own load's, not progress: it is not sent.
+					const bool joiningClient = g_config.role == Role::Client
+						&& (g_joinTeleportArmedAt != Clock::time_point{}
+							|| (g_joinSettledAt != Clock::time_point{}
+								&& Clock::now() - g_joinSettledAt < std::chrono::seconds(3)));
+					if (joiningClient && shareKey)
+					{
+						Log("CHECKPOINTSHARE not sent " + name
+							+ ": this Alice is still joining the host (cpjoin1).");
+					}
+					else if (shareKey && (replay == g_sharedSeqReplayUntil.end()
 						|| Clock::now() >= replay->second))
 					{
 						SharedWorldEventPayload share{};
@@ -23198,8 +23488,18 @@ namespace AliceCoop
 			// after the join did not happen)
 			if (found && (payload.flags & 4u) != 0)
 				found->TriggerCount = 0;
+			// cpjoin2: on the host, a checkpoint the client sends in its
+			// first 20 s on this map is the one of its own load (the chapter
+			// start: the restart then put both Alices in the first corridor),
+			// not progress - it is not applied.
+			const bool clientJoinCheckpoint = g_config.role == Role::Host
+				&& (payload.flags & 1u) != 0 && (payload.flags & 6u) == 0
+				&& g_hostPeerArrivedAt != Clock::time_point{}
+				&& Clock::now() - g_hostPeerArrivedAt < std::chrono::seconds(20);
 			if (!found)
 				result = "not found here";
+			else if (clientJoinCheckpoint)
+				result = "the other player is still joining - not applied (cpjoin2)";
 			else if ((payload.flags & 1u) != 0 && found->TriggerCount > 0)
 				result = "checkpoint already saved here";
 			else if ((payload.flags & 1u) == 0 && found->MaxTriggerCount <= 0)
@@ -24386,6 +24686,175 @@ namespace AliceCoop
 		// player comes into this map: a paused game resumes at once, and 3 s
 		// later the host's latest level checkpoint is sent (the client saves
 		// it and both restart from their checkpoint, see SHAREDSEQ RX).
+		// joinrestart3 (13.11 18:38, request): the client who came back to
+		// the giant section by hand comes up as the Wonderland Alice and
+		// stays broken, while a group restart puts both right. The host
+		// restarts both games by itself once the other Alice has stood next
+		// to this giant one as a Wonderland Alice for 5 s - never within 60 s
+		// of a restart (after it she is the Wonderland one for a moment too).
+		void TickJoinAutoRestart()
+		{
+			// joincontinue1: the rejoin now goes through Continue; the
+			// automatic restarts brought the Wonderland Alice back anyway
+			// (her checkpoint is saved as she is) - off
+			if ((true))
+				return;
+			static Clock::time_point since{};
+			static Clock::time_point lastRestart{};
+			static Clock::time_point arrival{};
+			static void* world = nullptr;
+			static bool peerWasGiant = false;
+			const auto now = Clock::now();
+			// the other Alice, once giant since she came in, is never
+			// restarted for being the Wonderland one (the section's end
+			// shrinks her first)
+			if (arrival != g_hostPeerArrivedAt || world != g_currentWorld)
+			{
+				arrival = g_hostPeerArrivedAt;
+				world = g_currentWorld;
+				peerWasGiant = false;
+			}
+			if (g_remotePresentation.valid && (g_remotePresentation.state.archetype & 0x0F)
+				== static_cast<std::uint8_t>(EAliceArcheType::AType_GiantMode))
+			{
+				peerWasGiant = true;
+			}
+			if (g_config.role != Role::Host || !g_connected || g_config.localMirror
+				|| _stricmp(g_currentMap.c_str(), "Chapter4_W3_P") != 0
+				|| WorldTransitionActive() || LeavingWorld())
+			{
+				since = {};
+				return;
+			}
+			if (g_localRestartInitiatedAt != Clock::time_point{}
+				&& now - g_localRestartInitiatedAt < std::chrono::seconds(60)
+				// a restart from before the other player came in does not count
+				&& !(g_hostPeerArrivedAt != Clock::time_point{} && g_localRestartInitiatedAt < g_hostPeerArrivedAt))
+			{
+				since = {};
+				return;
+			}
+			AAlicePawn* const pawn = GetLocalPawn();
+			AAlicePlayerController* const pc = g_State.AlicePlayerController;
+			const bool hostGiant = pawn && IsUsableObjectFast(pawn)
+				&& pawn->ArcheTypeID == EAliceArcheType::AType_GiantMode;
+			const bool peerHere = g_remotePresentation.valid
+				&& _stricmp(g_remotePresentation.state.mapName, g_currentMap.c_str()) == 0;
+			const bool peerWonderland = peerHere
+				&& (g_remotePresentation.state.archetype & 0x0F)
+					== static_cast<std::uint8_t>(EAliceArcheType::AType_Wonderland);
+			float distance2 = 1.0e12f;
+			if (pawn && peerHere)
+			{
+				const float dx = g_remotePresentation.state.location[0] - pawn->Location.X;
+				const float dy = g_remotePresentation.state.location[1] - pawn->Location.Y;
+				distance2 = dx * dx + dy * dy;
+			}
+			if (peerWasGiant || !hostGiant || !peerWonderland || distance2 > 4000.0f * 4000.0f
+				|| !pc || !IsUsableObjectFast(pc) || pc->bCinematicMode
+				|| g_inGameMenuOpenSignal
+				|| (lastRestart != Clock::time_point{} && now - lastRestart < std::chrono::seconds(120)))
+			{
+				since = {};
+				return;
+			}
+			if (since == Clock::time_point{})
+			{
+				since = now;
+				return;
+			}
+			// joinrestart4: the client first restarts alone (5 s); this is
+			// the fallback when she is still the Wonderland one 15 s on
+			if (now - since < std::chrono::seconds(15))
+				return;
+			since = {};
+			lastRestart = now;
+			Log("JOINRESTART the other Alice came into the giant section as the Wonderland one:"
+				" both games are restarted from the checkpoint (joinrestart3).");
+			RequestHostCheckpointRestart("host auto restart after a join");
+			if (!TriggerLocalCheckpointRestart("host auto restart after a join"))
+				Log("JOINRESTART the local restart could not start here (no HUD); the other game restarts alone.");
+		}
+
+		// joinrestart4 (13.11 18:42): before the host restarts both games,
+		// the client restarts alone. Its game already holds the host's
+		// checkpoint (jointp6 fires it again once this Alice is with the
+		// host), so its own checkpoint restart brings it back there as the
+		// giant one, and the host plays on undisturbed.
+		void TickJoinSelfRestart()
+		{
+			if (g_giantSaveHoldUntil != Clock::time_point{} && Clock::now() >= g_giantSaveHoldUntil)
+				RestoreGiantSaveArchetype("3 s passed");
+			if ((true))
+				return; // joincontinue1: off, see TickJoinAutoRestart
+			static void* world = nullptr;
+			static bool wasGiant = false;
+			static Clock::time_point since{};
+			const auto now = Clock::now();
+			if (world != g_currentWorld)
+			{
+				world = g_currentWorld;
+				wasGiant = false;
+				since = {};
+			}
+			if (g_config.role != Role::Client || !g_connected || g_config.localMirror
+				|| _stricmp(g_currentMap.c_str(), "Chapter4_W3_P") != 0
+				|| WorldTransitionActive() || LeavingWorld())
+			{
+				since = {};
+				return;
+			}
+			AAlicePawn* const pawn = GetLocalPawn();
+			if (!pawn || !IsUsableObjectFast(pawn))
+				return;
+			if (pawn->ArcheTypeID == EAliceArcheType::AType_GiantMode)
+			{
+				wasGiant = true;
+				since = {};
+				return;
+			}
+			AAlicePlayerController* const pc = g_State.AlicePlayerController;
+			const bool peerGiant = g_remotePresentation.valid
+				&& _stricmp(g_remotePresentation.state.mapName, g_currentMap.c_str()) == 0
+				&& (g_remotePresentation.state.archetype & 0x0F)
+					== static_cast<std::uint8_t>(EAliceArcheType::AType_GiantMode);
+			const float dx = g_remotePresentation.state.location[0] - pawn->Location.X;
+			const float dy = g_remotePresentation.state.location[1] - pawn->Location.Y;
+			const bool closeToPeer = dx * dx + dy * dy < 4000.0f * 4000.0f;
+			// the host's checkpoint must have been fired here first (jointp6:
+			// 2 s after this Alice reached the host)
+			const bool checkpointHeld = g_joinSettledAt != Clock::time_point{}
+				&& now - g_joinSettledAt > std::chrono::seconds(3)
+				&& g_joinCheckpointRefireAt == Clock::time_point{};
+			// a restart from before this join does not count (giantsave1:
+			// 19:00:17 restart, 19:00:43 join - the guard held it back)
+			const bool recentRestart = g_localRestartInitiatedAt != Clock::time_point{}
+				&& now - g_localRestartInitiatedAt < std::chrono::seconds(60)
+				&& !(g_joinRequestedAt != Clock::time_point{} && g_localRestartInitiatedAt < g_joinRequestedAt);
+			if (g_giantSaveHoldUntil != Clock::time_point{})
+				return; // the giant save is still being written
+			if (wasGiant || !peerGiant || !closeToPeer || !checkpointHeld || recentRestart
+				|| pawn->ArcheTypeID != EAliceArcheType::AType_Wonderland
+				|| !pc || !IsUsableObjectFast(pc) || pc->bCinematicMode
+				|| g_inGameMenuOpenSignal || g_joinTeleportArmedAt != Clock::time_point{})
+			{
+				since = {};
+				return;
+			}
+			if (since == Clock::time_point{})
+			{
+				since = now;
+				return;
+			}
+			if (now - since < std::chrono::seconds(5))
+				return;
+			since = {};
+			Log("JOINRESTART this Alice came into the giant section as the Wonderland one: only this game"
+				" restarts from the host's checkpoint it now holds (joinrestart4).");
+			if (!TriggerLocalCheckpointRestart("client self restart after a join"))
+				Log("JOINRESTART the restart could not start here (no HUD); the host restarts both later.");
+		}
+
 		void TickPeerArrival()
 		{
 			static bool peerWasHere = false;
@@ -24411,7 +24880,10 @@ namespace AliceCoop
 			const bool arrived = peerHere && !peerWasHere;
 			peerWasHere = peerHere;
 			if (arrived)
+			{
 				g_hostStreamFullNow = true; // jointp4
+				g_hostPeerArrivedAt = now; // cpjoin2
+			}
 			{
 				if (arrived)
 				{
@@ -32232,6 +32704,20 @@ namespace AliceCoop
 				return;
 			}
 			g_retiredFullyHidden.insert(pawn);
+			// kynapseleave1 (13.11 17:07:23, BOTH games ~1 s into the next
+			// map after the giant section: Kynapse's per-frame world update,
+			// Steam FUN_00d179f0 -> FUN_00d27b80 -> FUN_00d33940 with
+			// this=0x0000000C). The proxies that refused to be destroyed
+			// there were parked with their Kynapse entity still in the AI
+			// world. A parked proxy leaves the Kynapse world at once: its
+			// KynapseHandle is detached (that removes the entity).
+			if (pawn->KynapseHandle && IsLiveUObject(pawn->KynapseHandle)
+				&& pawn->KynapseHandle->bAttached)
+			{
+				const bool kynapseDetached = NativeDetachActorComponent(pawn, pawn->KynapseHandle);
+				Log(std::string("PROXYDESTROY parked proxy left the Kynapse world: ")
+					+ (kynapseDetached ? "yes" : "no") + " (kynapseleave1).");
+			}
 			pawn->bHidden = true;
 			NativeSetActorHidden(pawn, true);
 			pawn->SetTickIsDisabled(true);
@@ -44727,6 +45213,7 @@ namespace AliceCoop
 			// may still read it this frame) and nothing is relinked - the
 			// sequences are looked up by name when they are played.
 			to = RawGameArray{ copy, from.num, from.num };
+			g_proxyGiantDressedFor = remote; // giantleave1
 			constexpr bool updateAnimations = false;
 			Log("ANIMSETS proxy body takes the playable Alice's animation sets ("
 				+ std::to_string(before) + " -> " + std::to_string(from.num)
@@ -44916,6 +45403,8 @@ namespace AliceCoop
 				if (sample.size() < 200)
 					sample += ' ' + std::to_string(index) + ':' + name + "->" + targetName;
 			}
+			if (changed > 0)
+				g_proxyGiantDressedFor = remote; // giantleave1
 			static int logsLeft = 20;
 			if ((changed > 0 || noLinkup > 0) && logsLeft > 0)
 			{
@@ -60170,6 +60659,15 @@ namespace AliceCoop
 		std::unordered_map<std::uint64_t, InterpWish> g_hostInterpWish;
 		void* g_hostInterpWishWorld = nullptr;
 		std::unordered_map<std::uint64_t, InterpWish> g_hostLoopWish; // looploop1
+		// cinesync1: the host's playing cutscenes, as last received
+		std::unordered_map<std::uint64_t, InterpWish> g_hostCineWish;
+		struct CineSteer
+		{
+			float originalRate = 1.0f;
+			bool steering = false;
+			Clock::time_point loggedAt{};
+		};
+		std::unordered_map<std::uint64_t, CineSteer> g_cineSteer;
 	}
 
 	void NoteHostRestartForInterpSync()
@@ -60190,6 +60688,13 @@ namespace AliceCoop
 			g_hostInterpWishWorld = g_currentWorld;
 			g_hostInterpWish.clear();
 			g_hostLoopWish.clear();
+		}
+		if ((event.flags & 2u) != 0) // cinesync1: a playing cutscene
+		{
+			InterpWish& cine = g_hostCineWish[event.entityKey];
+			cine.position = static_cast<float>(event.damage) / 1000.0f;
+			cine.at = Clock::now();
+			return;
 		}
 		if ((event.flags & 1u) != 0) // looploop1: a playing looping Matinee
 		{
@@ -60298,6 +60803,155 @@ namespace AliceCoop
 		}
 	}
 
+	USeqAct_Interp* FindCutsceneAction(std::uint64_t entityKey);
+	bool InterpHasDirectorTrack(const USeqAct_Interp* action);
+
+	// cinesync1 (13.11 19:14, "the client's cutscene is late and does not
+	// catch up with the host's - all cutscenes"): each game ran its copy of
+	// a cutscene on its own clock from the moment it started there, and
+	// nothing ever brought them together again. The host now sends the
+	// position of each cutscene it plays (a director Matinee) 4 times a
+	// second; the client plays its copy a little faster when it is behind
+	// (slower when ahead) and jumps only for a real gap.
+	void TickCutscenePositionSync(Clock::time_point now, UFunction* setPosition)
+	{
+		if (g_config.role == Role::Host)
+		{
+			static Clock::time_point next{};
+			if (now < next)
+				return;
+			next = now + std::chrono::milliseconds(250);
+			static std::vector<USeqAct_Interp*> playing;
+			static Clock::time_point nextScan{};
+			if (now >= nextScan)
+			{
+				nextScan = now + std::chrono::seconds(1);
+				playing.clear();
+				TArray<UObject*>* objects = UObject::GObjObjects();
+				for (int32_t index = 0; objects && index < objects->size() && playing.size() < 6; ++index)
+				{
+					UObject* const object = objects->at(index);
+					if (!object || object->IsDefaultObject() || !IsUsableObjectFast(object)
+						|| !object->IsA(USeqAct_Interp::StaticClass()))
+						continue;
+					auto* const action = reinterpret_cast<USeqAct_Interp*>(object);
+					if (!action->bIsPlaying || action->bLooping || !action->InterpData
+						|| !ObjectChainUsable(object) || !InterpHasDirectorTrack(action))
+						continue;
+					playing.push_back(action);
+				}
+			}
+			for (auto it = playing.begin(); it != playing.end();)
+			{
+				USeqAct_Interp* const action = *it;
+				if (!IsUsableObjectFast(action) || !action->bIsPlaying || !action->InterpData)
+				{
+					it = playing.erase(it);
+					continue;
+				}
+				++it;
+				if (action->bPaused || action == g_waitingCutsceneAction)
+					continue;
+				SharedWorldEventPayload event{};
+				event.kind = static_cast<SharedWorldEventKind>(58);
+				event.entityKey = SequenceActionStableKey(action);
+				event.originActorId = 1u;
+				event.flags = 2u;
+				event.damage = static_cast<std::int32_t>(action->Position * 1000.0f);
+				if (event.entityKey)
+					QueueSharedWorldEvent(event);
+			}
+			return;
+		}
+		if (g_hostInterpWishWorld != g_currentWorld)
+		{
+			g_hostCineWish.clear();
+			g_cineSteer.clear();
+			return;
+		}
+		static int logsLeft = 80;
+		for (auto it = g_hostCineWish.begin(); it != g_hostCineWish.end();)
+		{
+			const std::uint64_t key = it->first;
+			const InterpWish wish = it->second;
+			const float age = std::chrono::duration<float>(now - wish.at).count();
+			USeqAct_Interp* const action = FindCutsceneAction(key);
+			auto steer = g_cineSteer.find(key);
+			const bool stale = age > 1.0f;
+			const bool usable = action && IsUsableObjectFast(action) && action->bIsPlaying
+				&& !action->bPaused && action->InterpData && action != g_waitingCutsceneAction
+				// a skip's fast-forward is running (40x) or just ran
+				&& action->PlayRate > 0.01f && action->PlayRate <= 2.0f
+				&& (g_lastCutsceneSkipAt == Clock::time_point{}
+					|| now - g_lastCutsceneSkipAt > std::chrono::milliseconds(1500));
+			if (stale || !usable)
+			{
+				if (steer != g_cineSteer.end())
+				{
+					if (steer->second.steering && action && IsUsableObjectFast(action)
+						&& action->PlayRate <= 2.0f)
+					{
+						action->PlayRate = steer->second.originalRate;
+					}
+					g_cineSteer.erase(steer);
+				}
+				if (stale)
+					it = g_hostCineWish.erase(it);
+				else
+					++it;
+				continue;
+			}
+			++it;
+			CineSteer& state = g_cineSteer[key];
+			if (!state.steering)
+				state.originalRate = action->PlayRate;
+			const float length = action->InterpData->InterpLength;
+			// the host's position now (the packet's age plus its transit)
+			float target = wish.position + (age + 0.04f) * state.originalRate;
+			if (length > 0.0f)
+				target = (std::min)(target, length);
+			const float drift = target - action->Position;
+			std::string what;
+			if (drift > 1.0f && setPosition)
+			{
+				// a real gap: go to the host's place (events on the way fire)
+				USeqAct_Interp_execSetPosition_Params jump{};
+				jump.NewPosition = target;
+				jump.bJump = false;
+				InvokeNativeFunction(action, setPosition, jump);
+				action->PlayRate = state.originalRate;
+				state.steering = false;
+				what = "jumped";
+			}
+			else if (drift > 0.08f || drift < -0.15f)
+			{
+				const float factor = drift > 0.0f
+					? (std::min)(1.5f, 1.0f + drift)
+					: (std::max)(0.7f, 1.0f + drift);
+				action->PlayRate = state.originalRate * factor;
+				state.steering = true;
+				what = drift > 0.0f ? "faster" : "slower";
+			}
+			else if (state.steering)
+			{
+				action->PlayRate = state.originalRate;
+				state.steering = false;
+				what = "in step";
+			}
+			if (!what.empty() && logsLeft > 0
+				&& (what == "jumped" || what == "in step" || state.loggedAt == Clock::time_point{}
+					|| now - state.loggedAt > std::chrono::seconds(2)))
+			{
+				--logsLeft;
+				state.loggedAt = now;
+				Log("CUTSCENEDRIFT key=" + SharedWorldKeyText(key) + ": here "
+					+ std::to_string(action->Position) + ", host " + std::to_string(target)
+					+ " (drift " + std::to_string(drift) + " s) -> " + what
+					+ ", rate " + std::to_string(action->PlayRate) + " (cinesync1).");
+			}
+		}
+	}
+
 	void TickInterpStateSync()
 	{
 		if (!g_connected || g_config.localMirror || !g_currentWorld
@@ -60309,6 +60963,7 @@ namespace AliceCoop
 		static UFunction* setPosition = nullptr;
 		if (!setPosition)
 			setPosition = FindFunctionSafe("Function Engine.SeqAct_Interp.SetPosition");
+		TickCutscenePositionSync(now, setPosition); // cinesync1
 		if (g_config.role == Role::Host)
 		{
 			bool due = false;
@@ -60887,6 +61542,46 @@ namespace AliceCoop
 		g_forceAutoJoinOnce = true;
 		if (!TriggerLocalReturnToMenu("restart landed elsewhere"))
 			g_forceAutoJoinOnce = false;
+	}
+
+	// giantleave1 (13.11 20:00:37, the giant section's end, Cin_471): both
+	// Alices were Wonderland Alices again in the next part, but each saw the
+	// other as "a giant of normal size". The proxy had taken the giant's
+	// animation sets and its locomotion nodes the giant clips (animsets2 /
+	// giantwalk2) - and nothing put them back when the giant mode ended; a
+	// restart (a new proxy) did. Once this Alice has left the giant mode
+	// for 1.5 s, a proxy dressed as the giant is made again.
+	void TickProxyGiantLeave()
+	{
+		static Clock::time_point since{};
+		if (!g_remotePawn || g_proxyGiantDressedFor != g_remotePawn || LeavingWorld())
+		{
+			since = {};
+			return;
+		}
+		AAlicePawn* const local = GetLocalPawn();
+		const AAlicePlayerController* const controller = g_State.AlicePlayerController;
+		if (!local || !IsUsableObjectFast(local)
+			|| local->ArcheTypeID == EAliceArcheType::AType_GiantMode
+			|| (controller && controller->bCinematicMode))
+		{
+			since = {};
+			return;
+		}
+		const auto now = Clock::now();
+		if (since == Clock::time_point{})
+		{
+			since = now;
+			return;
+		}
+		if (now - since < std::chrono::milliseconds(1500))
+			return;
+		since = {};
+		g_proxyGiantDressedFor = nullptr;
+		Log("GIANTLEAVE this Alice left the giant mode (archetype "
+			+ std::to_string(static_cast<int>(local->ArcheTypeID))
+			+ "): the proxy dressed as the giant is made again (giantleave1).");
+		RemoveProxyBeforeWorldTeardown("giant mode over");
 	}
 
 	void TickProxyHairRespawn()
@@ -65376,6 +66071,9 @@ namespace AliceCoop
 		bool IsLiveSpawnFactory(USeqAct_ActorFactory* factory);
 		void ResetSharedSpawnsForRestart(const char* why)
 		{
+			++g_restartGeneration; // breakrestart1: every checkpoint restart passes here
+			Log(std::string("BREAKRESTART shared breakables and hive reveals start over (")
+				+ why + ", breakrestart1).");
 			if (g_sharedSpawns.empty())
 				return;
 			for (auto& [key, counter] : g_sharedSpawns)
@@ -66732,9 +67430,33 @@ namespace AliceCoop
 			if (event->MaxTriggerCount > 0 && event->TriggerCount < event->MaxTriggerCount)
 			{
 				const int before = event->TriggerCount;
+				// crowdtouch1 (13.11 15:47:47, giant section C01: the client
+				// walked into the trigger, the small enemies came out there
+				// only - here the trigger was just marked used, its crowd
+				// spawner never started, every kill from there found "no live
+				// agent"). The crowd spawners it starts are started here too.
+				std::string crowdStarted;
+				if (event->OutputLinks.size() > 0)
+				{
+					const auto& links = event->OutputLinks.at(0).Links;
+					for (int32_t l = 0; l < links.size(); ++l)
+					{
+						USequenceOp* const target = links.at(l).LinkedOp;
+						const int input = links.at(l).InputLinkIdx;
+						if (!target || !IsLiveUObject(target) || input != 0 || !target->Class
+							|| ObjectName(target->Class).find("CrowdSpawner") == std::string::npos)
+						{
+							continue;
+						}
+						const bool ok = NativeForceActivateSequenceInput(target, input);
+						crowdStarted += " " + ObjectName(target) + (ok ? "=ok" : "=fail");
+					}
+				}
 				event->TriggerCount = event->MaxTriggerCount;
 				Log("TOUCHONCE " + ObjectName(event) + " used up here: count " + std::to_string(before)
-					+ " -> " + std::to_string(event->TriggerCount) + " (touchonce1).");
+					+ " -> " + std::to_string(event->TriggerCount) + " (touchonce1)"
+					+ (crowdStarted.empty() ? std::string(".")
+						: ", crowd started:" + crowdStarted + " (crowdtouch1)."));
 			}
 			return true;
 		}
@@ -67715,6 +68437,68 @@ namespace AliceCoop
 		return false;
 	}
 
+	// skipevents1 (13.11 16:42:13.9, host, giant section C01: the client's
+	// skip jumped the Matinee to its end here, past its event key
+	// "Evt_ShowSpawner" - the spawner of the small enemies stayed hidden,
+	// its ActorFactory never ran). The event keys a skip jumps over are
+	// fired by hand: every op wired to that named output is started.
+	void FireSkippedMatineeEvents(USeqAct_Interp* action, float from, float to)
+	{
+		if (!action || !IsLiveUObject(action) || !action->InterpData
+			|| !IsLiveUObject(action->InterpData) || to <= from + 0.001f)
+		{
+			return;
+		}
+		UInterpData* const data = action->InterpData;
+		std::string fired;
+		for (int32_t g = 0; g < data->InterpGroups.size(); ++g)
+		{
+			UInterpGroup* const group = data->InterpGroups.at(g);
+			if (!group || !IsLiveUObject(group))
+				continue;
+			for (int32_t t = 0; t < group->InterpTracks.size(); ++t)
+			{
+				UInterpTrack* const track = group->InterpTracks.at(t);
+				if (!track || !IsLiveUObject(track)
+					|| !track->IsA(UInterpTrackEvent::StaticClass()))
+				{
+					continue;
+				}
+				auto* const events = reinterpret_cast<UInterpTrackEvent*>(track);
+				if (events->bFireEventsWhenJumpingForwards)
+					continue; // the jump fired these itself
+				for (int32_t k = 0; k < events->EventTrack.size(); ++k)
+				{
+					const FEventTrackKey& eventKey = events->EventTrack.at(k);
+					if (eventKey.Time <= from || eventKey.Time > to + 0.001f)
+						continue;
+					const std::string eventName = eventKey.EventName.ToString();
+					for (int32_t o = 0; o < action->OutputLinks.size(); ++o)
+					{
+						auto& output = action->OutputLinks.at(o);
+						if (_stricmp(output.LinkDesc.ToString().c_str(), eventName.c_str()) != 0)
+							continue;
+						for (int32_t l = 0; l < output.Links.size(); ++l)
+						{
+							USequenceOp* const target = output.Links.at(l).LinkedOp;
+							if (!target || !IsLiveUObject(target))
+								continue;
+							const bool ok = NativeForceActivateSequenceInput(target,
+								output.Links.at(l).InputLinkIdx);
+							fired += " " + eventName + "->" + ObjectName(target)
+								+ (ok ? "=ok" : "=fail");
+						}
+					}
+				}
+			}
+		}
+		if (!fired.empty())
+		{
+			Log("CUTSCENESKIP event keys jumped over, fired by hand:" + fired
+				+ " (skipevents1).");
+		}
+	}
+
 	bool ApplyRemoteCutsceneSkip(std::uint64_t key, bool allowFallback)
 	{
 		USeqAct_Interp* const action = FindCutsceneAction(key);
@@ -67731,7 +68515,8 @@ namespace AliceCoop
 		AAlicePlayerController* const controller = g_State.AlicePlayerController;
 		ReleaseHeldSpawnFactories("remote skip");
 		const bool drivesEnemies = MatineeDrivesEnemies(action);
-		if (drivesEnemies && JumpMatineeToEnd(action))
+		bool jumpedByMod = false; // skipevents1
+		if (drivesEnemies && (jumpedByMod = JumpMatineeToEnd(action)))
 		{
 			Log("CUTSCENESKIP the Matinee drives enemies: jumped to its end key="
 				+ SharedWorldKeyText(key) + '.');
@@ -67766,6 +68551,14 @@ namespace AliceCoop
 			jumped = InvokeNativeFunction(action, setPosition, parameters);
 		}
 		g_lastCutsceneSkipAt = Clock::now(); // skipblack1
+		{
+			const float after = action->bIsPlaying ? action->Position
+				: (action->InterpData ? action->InterpData->InterpLength : action->Position);
+			// only a jump of the mod's skips the event keys (the game's own
+			// skip plays through them)
+			if (jumped || jumpedByMod)
+				FireSkippedMatineeEvents(action, before, after); // skipevents1
+		}
 		Log("CUTSCENESKIP applied key=" + SharedWorldKeyText(key) + ", action="
 			+ ObjectName(action) + ", position=" + std::to_string(before)
 			+ "->" + std::to_string(action->Position) + ", playing="
@@ -67960,7 +68753,14 @@ namespace AliceCoop
 			// so it can be skipped at once.
 			// skipepoch1: only for a skip that arrived moments ago (the opening
 			// cutscene case); an old one is never used to start a cutscene.
+			// skiponce1 (13.11 17:44:27.5, client, Cin_461 - Alice turns
+			// giant): this skip had already skipped the cutscene here at
+			// 17:44:20; when the game started it again on its own, this
+			// started it a second time over it - Alice came out Wonderland,
+			// the camera stayed in the cutscene. A skip that was applied
+			// never starts its cutscene again.
 			if (action && !action->bIsPlaying && !pending.forced
+				&& pending.fallbackAt == Clock::time_point{}
 				&& now - pending.receivedAt > std::chrono::milliseconds(1500)
 				&& now - pending.receivedAt < std::chrono::seconds(8))
 			{
@@ -71256,6 +72056,156 @@ namespace AliceCoop
 	// PostLoadCheckPointChangeArcheType(London). In the first 15 s of a
 	// London map (ChapterN_L...), a playable Alice still Wonderland after
 	// 1 s outside a cutscene is switched to London once.
+	// giantfix1 (13.11 17:44:45, client, group restart in the giant
+	// section: the checkpoint had been saved while this Alice was still the
+	// Wonderland one after a broken transformation cutscene - she came back
+	// normal-sized next to the giant host and could not go on). In
+	// Chapter4_W3_P, a Wonderland Alice who has not been giant in this world,
+	// standing near the other Alice who is giant, outside any cutscene for
+	// 6 s, is made giant the way a checkpoint load does.
+	void TickGiantArchetypeFix(AAlicePawn* localPawn)
+	{
+		static void* world = nullptr;
+		static bool wasGiant = false;
+		static bool done = false;
+		static Clock::time_point since{};
+		static Clock::time_point switchAt{}; // giantfix3
+		const auto now = Clock::now();
+		if (world != g_currentWorld)
+		{
+			world = g_currentWorld;
+			wasGiant = false;
+			done = false;
+			since = {};
+			switchAt = {};
+		}
+		// giantfix3 (13.11 18:27:46: 'TP_Giant' fired 5/5 - Alice was taken
+		// to the giant start, but stayed the Wonderland one: the event only
+		// moves her and sets the section up; on the first join the archetype
+		// switch came 0.8 s after it). The archetype is switched a moment
+		// after the event, as there.
+		if (switchAt != Clock::time_point{} && now >= switchAt)
+		{
+			switchAt = {};
+			AAlicePlayerController* const switchPc = g_State.AlicePlayerController;
+			if (localPawn && IsUsableObjectFast(localPawn)
+				&& localPawn->ArcheTypeID != EAliceArcheType::AType_GiantMode
+				&& switchPc && IsUsableObjectFast(switchPc))
+			{
+				Log("GIANTFIX the archetype is switched to the giant one after the giant event (giantfix3).");
+				switchPc->PostLoadCheckPointChangeArcheType(EAliceArcheType::AType_GiantMode);
+			}
+		}
+		// joinrestart3: the host's automatic group restart puts this right;
+		// the hand-made transformation (no walking) is no longer used
+		constexpr bool kGiantFixByHand = false;
+		if (!kGiantFixByHand || done || !localPawn || !IsUsableObjectFast(localPawn) || !g_connected
+			|| _stricmp(g_currentMap.c_str(), "Chapter4_W3_P") != 0)
+		{
+			return;
+		}
+		if (localPawn->ArcheTypeID == EAliceArcheType::AType_GiantMode)
+		{
+			wasGiant = true;
+			since = {};
+			return;
+		}
+		AAlicePlayerController* const pc = g_State.AlicePlayerController;
+		const bool peerGiant = g_remotePresentation.valid
+			&& _stricmp(g_remotePresentation.state.mapName, g_currentMap.c_str()) == 0
+			&& (g_remotePresentation.state.archetype & 0x0F)
+				== static_cast<std::uint8_t>(EAliceArcheType::AType_GiantMode);
+		const float dx = g_remotePresentation.state.location[0] - localPawn->Location.X;
+		const float dy = g_remotePresentation.state.location[1] - localPawn->Location.Y;
+		const bool closeToPeer = dx * dx + dy * dy < 4000.0f * 4000.0f;
+		if (wasGiant || !peerGiant || !closeToPeer
+			|| localPawn->ArcheTypeID != EAliceArcheType::AType_Wonderland
+			|| !pc || !IsUsableObjectFast(pc) || pc->bCinematicMode
+			|| WorldTransitionActive() || LeavingWorld())
+		{
+			since = {};
+			return;
+		}
+		if (since == Clock::time_point{})
+		{
+			since = now;
+			return;
+		}
+		if (now - since < std::chrono::seconds(3))
+			return;
+		done = true;
+		// giantfix2 (13.11 18:17:19: the archetype switch alone made a giant
+		// who could only attack - no walking). The game makes Alice giant
+		// with one remote event at the end of Cin_461 (18:15:57.165 on the
+		// first join: Main_Sequence.SeqEvent_RemoteEvent_3 and its PlaytestUI
+		// / NPCMapStreaming / sound / music twins fired together). That
+		// event's name is fired here, every listener of it, as the game's
+		// ActivateRemoteEvent would; the bare switch is only the fallback.
+		std::string giantEvent;
+		std::vector<USeqEvent_RemoteEvent*> listeners;
+		TArray<UObject*>* objects = UObject::GObjObjects();
+		UClass* const remoteClass = USeqEvent_RemoteEvent::StaticClass();
+		for (int32_t pass = 0; pass < 2; ++pass)
+		{
+			for (int32_t index = 0; objects && remoteClass && index < objects->size(); ++index)
+			{
+				UObject* const object = objects->at(index);
+				if (!object || object->IsDefaultObject() || !IsUsableObjectFast(object)
+					|| !object->IsA(remoteClass))
+				{
+					continue;
+				}
+				auto* const event = reinterpret_cast<USeqEvent_RemoteEvent*>(object);
+				if (pass == 0)
+				{
+					if (ObjectName(event).find("Chapter4_W3_P.TheWorld.PersistentLevel.Main_Sequence.SeqEvent_RemoteEvent_3")
+						!= std::string::npos)
+					{
+						giantEvent = event->EventName.ToString();
+						break;
+					}
+				}
+				else if (!giantEvent.empty() && event->EventName.ToString() == giantEvent)
+				{
+					listeners.push_back(event);
+				}
+			}
+			if (giantEvent.empty())
+				break;
+		}
+		int fired = 0;
+		for (USeqEvent_RemoteEvent* const event : listeners)
+		{
+			if (event->MaxTriggerCount > 0 && event->TriggerCount >= event->MaxTriggerCount)
+				event->TriggerCount = 0;
+			// as the game's ActivateRemoteEvent: the WorldInfo is originator
+			// and instigator (checkpointshare2), switched on if need be
+			TArray<int32_t> indices;
+			bool ok = g_currentWorld && NativeCheckSequenceEvent(event, g_currentWorld, g_currentWorld,
+				false, false, indices);
+			if (!ok && g_currentWorld && !event->bEnabled)
+			{
+				event->bEnabled = 1u;
+				TArray<int32_t> retry;
+				ok = NativeCheckSequenceEvent(event, g_currentWorld, g_currentWorld, false, false, retry);
+			}
+			if (ok)
+				++fired;
+		}
+		Log("GIANTFIX this Alice is the Wonderland one next to the giant other Alice in the giant section:"
+			" the game's giant event '" + giantEvent + "' fired for " + std::to_string(fired) + "/"
+			+ std::to_string(listeners.size()) + " listener(s) (giantfix2).");
+		if (fired == 0)
+		{
+			Log("GIANTFIX no giant event here: the archetype is switched as a checkpoint load does (giantfix1).");
+			pc->PostLoadCheckPointChangeArcheType(EAliceArcheType::AType_GiantMode);
+		}
+		else
+		{
+			switchAt = now + std::chrono::milliseconds(800); // giantfix3
+		}
+	}
+
 	void TickLondonArchetypeFix(AAlicePawn* localPawn)
 	{
 		static void* world = nullptr;
@@ -71727,6 +72677,11 @@ namespace AliceCoop
 		return buffer;
 	}
 
+	void LogFromFix(const std::string& message)
+	{
+		Log(message); // kynapseguard1
+	}
+
 	void ResetEngineStartState(const char* why)
 	{
 		AAlicePlayerController* const pc = g_State.AlicePlayerController;
@@ -71764,6 +72719,18 @@ namespace AliceCoop
 					+ ", checkpoint " + (engine->CurrentCheckpoint ? "held" : "none") + ").");
 			}
 			engine->PendingCheckpointAction = ECheckpointAction::Checkpoint_Default;
+			// chapterflag1 (13.11 17:56:41, chapter 44 - the giant section -
+			// chosen in the list after a group restart: both Alices came up
+			// in the first corridor). The restart left the action flag at
+			// 2 (ConfigAndPersistentData: no checkpoint part), so the chosen
+			// chapter's checkpoint was never applied. A fresh start has 0.
+			if (engine->PendingCheckpointActionFlag != ECheckpointActionFlag::CheckpointFlag_ALL)
+			{
+				Log("ENGINESTATE checkpoint action flag "
+					+ std::to_string(static_cast<int>(engine->PendingCheckpointActionFlag))
+					+ " -> 0 for the chosen chapter (chapterflag1).");
+				engine->PendingCheckpointActionFlag = ECheckpointActionFlag::CheckpointFlag_ALL;
+			}
 			engine->CurrentCheckpoint = nullptr;
 			engine->PendingCheckpointLocation = FVector(0.0f, 0.0f, 0.0f);
 		}
@@ -71795,10 +72762,47 @@ namespace AliceCoop
 				+ engine->StartStateName.ToString() + ", " + EngineCheckpointStateText(engine) + '.');
 	}
 
+	// giantsave1: the archetypes are put back once the checkpoint is
+	// written (or after 3 s at most)
+	void RestoreGiantSaveArchetype(const char* why)
+	{
+		if (g_giantSaveHoldUntil == Clock::time_point{})
+			return;
+		g_giantSaveHoldUntil = {};
+		AAlicePawn* const pawn = GetLocalPawn();
+		if (pawn && pawn == g_giantSavePawn && IsUsableObjectFast(pawn) && g_giantSavePawnArch >= 0)
+		{
+			pawn->ArcheTypeID = static_cast<EAliceArcheType>(g_giantSavePawnArch);
+			AAliceGameInfo* const game = pawn->WorldInfo && pawn->WorldInfo->Game
+				&& pawn->WorldInfo->Game->IsA(AAliceGameInfo::StaticClass())
+				? reinterpret_cast<AAliceGameInfo*>(pawn->WorldInfo->Game) : nullptr;
+			if (game && g_giantSaveGameArch >= 0)
+				game->AliceArcheTypeID = static_cast<EAliceArcheType>(g_giantSaveGameArch);
+		}
+		g_giantSavePawn = nullptr;
+		g_giantSavePawnArch = g_giantSaveGameArch = -1;
+		Log(std::string("JOINTP archetypes put back after the giant save (") + why + ", giantsave1).");
+	}
+
 	void ObserveSavePath(const wchar_t* effectivePath)
 	{
 		if (!g_config.enabled || !effectivePath || !*effectivePath)
 			return;
+		if (g_giantSaveHoldUntil != Clock::time_point{} && wcsstr(effectivePath, L"Alice2Checkpoint"))
+		{
+			// the log line below must still show the giant archetype
+			struct Restore { ~Restore() { RestoreGiantSaveArchetype("checkpoint written"); } } restoreAfter;
+			static int giantSaveLogs = 8;
+			if (giantSaveLogs-- > 0)
+				Log("SAVEWRITE giant save " + NarrowAscii(effectivePath) + " (archetype "
+					+ CurrentGameArchetypeText() + ").");
+			return ObservedSavePathRest(effectivePath);
+		}
+		ObservedSavePathRest(effectivePath);
+	}
+
+	void ObservedSavePathRest(const wchar_t* effectivePath)
+	{
 		{
 			static int saveLogsLeft = 60;
 			if (saveLogsLeft > 0)
@@ -71984,7 +72988,7 @@ namespace AliceCoop
 			// Both logs must show the same stamp: a host and a client built
 			// from different sources silently drop each other's new events.
 			Log(std::string("BUILD stamp=") + __DATE__ + " " + __TIME__
-				+ ", features=enemyspawn,sharedtouch,netlog2,hive2,teeth3,pause11,hint3,board6,wake6,leech6,worldgen1,poster1,uitrace3,snout5,hair2,spawn3,drivefail4,leave1,ea1,pause12,shotend1,hairrel1,teapot3,settrace1,leave2,pause14,hairdiag1,jointp1,flower2,bomb2,seqev2,los1,bomb3,dress1,save1,ears1,hairpreset1,bomb4,dlcvar1,wpnlight2,trailerhud1,blackscreen2,nosync1,dlclight3,flower3,ears2,hairpreset2,bombfall1,dlcfx1,trail2,freecam2,joinview1,sessionhost1,savefwd1,autojoinstale1,savecheck1,flower4,teapotend1,ears3,hairauto1,icons1,earcrash1,trailfix2,losrepeat1,hostexit1,flower5,hairsettle2,ears4,statue1,sethidden2,haircode1,trailcode1,retirefps1,earphys1,shotleft1,hairshape3,trailtick3,shotretire2,earphys2,pepperdlc2,hostmenu2,hostgone1,earhead3,hairshape4,destroydirect1,hairpreset4,enemyshield1,aggrowake1,spectate1,hintdone1,bolterdiag1,shadowdiag1,shieldconst2,armour1,clothfit1,spectate2,enemyhidden1,platehit1,spectate3,platehit2,hitprobe2,clothdress2,umbrella2,damageable1,aiwake2,stickytarget1,npcshot3,sharedshots2,hostpawnpause1,shieldhit5,enemyrec1,ruinsticky1,shieldreact2,noretarget1,enemyfx2,ruinfocus2,jelly1,stall2,pickupname1,handover1,clientpause1,spawnhold1,decoy1off,brainoff1,cutscenehold1,shotdeflect2,loopfx1,ownanim4log,aibroken1,release2,staleaim1,shotkey1,skipjump1,shotcourse2,shotfx1,deathfix1,deathanim3,focus2,aliceshotdiag3,kynapsediag1,animsync1,deathfx1,aliceshotdiag4,deathfx2,aliceshotdiag5,deathanim4,fxguard1,lockaim1,slide1,interphold1,deathanim5,posesmooth1,interpstuck3,animtime2,skipfast1,treediag3,hintpause1,branch1,posesmooth2,midaction1,deathfx3,treediag2,posestep1,interpstuck4,rootopt2,flowerspent1,brainoff2,interpstuck5,trace2,replayloop1,readycheck2,nosolowarn1,frozen1,branch2,restart1,icewake1,ruinghost1,restartcrash1,cutsceneonce1,restart2,restart3,readycheck3,readycheck4,spectatecam1,joinskip1,autojoin2,autojoin3,londonhair1,hostfps1,londonbow1,londonbow2,londonbow3,proxyfreeze1,fpsfade1,fpsfade2,fpsfade3,spectatecine3,pausehold1,autojoin4,autojoin5,autojoin6,autojoin7,savekeep2,restartrejoin1,spawnsettle1,cutsceneautojoin2,skipqueue1,spectatecine4,hinthide1,hinthide2,hinthide3,hinthide4,hintcrash1,pausefocus1,pausefocus2,pausefast1,streamsync1,streamsync2,interpsync1,interpsync2,archguard1,archguard2,archguard3,archfix1,londonproxy1,loadhold1,chapterdiag1,chapterdiag2,startstate1,enginestate1,enginestate2,freshchapter1,haircarry2,haircarry3,leaveclear1,spectatesmooth1,shotowner1,dupresolve1,londonclose1,mapleave1,cinediag1,hairroot1,skipwait1,londonhairdup1,hairwarm1,spectatecast1,spectatecast2,spectatecast3,skipforce1,skipload1,spectateoff1,spectatepause1,hairskel1,hairown1,skipepoch1,binkskip1,hairwind1,hairpatch1,hairpatch2,hairsubstep1,spectatelondon1,spectatewhy1,hairrespawn1,haircollide1,hairflags1,animsets1,animsets2,giantsync1,giantwalk1,giantwalk2,giantwalk3,giantrestart1,giantrestart2,giantrestart3,giantrestart4,giantrestart5,giantrestart6,giantdress1,giantanim1,giantanim2,hairrespawn2,hairdump1,hairair1,hairstep1,hairstiff1,giantstomp2,giantstomp1,giantcrowd1,giantfloor1,giantfloor2,crowdsync1,crowdsync2,crowdsync3,crowdsync4,crowdsync5,crowdsync6,dressfast1,londonhairphys1,enemyrecsafe1,spectatecine1,hairrec1,hairsync1,hairsync2,hairrec2,proxyleave1,proxyleave2,enemyreset1,savenative1,menucursor1,fovtunnel1,londontpose1,platesync1,leversync1,sphinxcrash1,hitfxguard1,seqparent1,londontpose2,vtablediag1,bowfly1,platesync2,platesync3,catsync1,chesswatch1,chesswatch2,chesswatch3,spawndiag1,deadstop1,chesswatch4,jumppad1,stunfly1,jumppad2,hysteriacopy1,chesswatch5,watchsize1,enemyrectree1,projcauser1,stunhit1,flyreact1,copycollide1,ruinstun1,flyreact2,shotassist1,grabguard1,grabguard2,grabguard3,grabsync1,guardstop1,stunhit2,grabrescue1,novhysteria1,ruinknock1,meleeassist1,meleefx1,spawndup1,codedump1,recname1,looploop1,deathfx4,bloodfx1,minigame1,minigamediag1,rollshare1,rollwatch2,rollwatch3,watchicon1,rollcannon1,cannonsync2,restartcine1,restartcine2,shadowproxy1,safefind1,leverlock1,archproxy1,grabcam1,grabrec1,archfix2,grabcam2,spawndup2,fxguard2,skipblack1,enemykey1,enemyanimset1,shotboom1,platewake1,grabcam3,checkpointshare1,skipblack2,platewake2,curveshot1,locosync1,enemyemit1,plateanim1,headwake1,platedead1,locktarget1,slotguard1,plateanim2,tankbrain1,highaddr1,highaddr2,highaddr3,checkpointshare2,leavesafe1,blockshare1,blockwatch1,padhold1,paddoor1,paddoor2,blockreset1,blockreset2,padmech1,fxguard3,crabguard1,musicwatch1,crabguard2,musicwatch2,spawnpick1,crabguard3,branchhold1,musicwatch3,crabflick1,perf1,crabhost1,musicclick1,musicswf1,perf2,musicflash1,crabwalk1,stalestop1,spawnpick2,restartsync1,continue1,continue2,continue3,perf3,crabflick2,hostmenu3,musicleave1,visualshield1,continue4,swfdump1,perf4,swfdump2,joinwait1,branchhold2,shootshare1,sololeave1,continue5,crabstun1,touchonce1,exitcrash2,swfdump3,continue6,shootshare2,shootshare3,joinskip2,solojoin1,shootwatch1,shoothit1,shootshare4,shoothit2,shootshare5,shootcard1,shoothit3,shootshare6,shootfind1,shootshare7,solojoin2,shootshare8,shootmirror1,shootstart1,shootcard2,shootskip1,shootmirror2,shootstart2,shootshot2,shootcollide1,shootdeath1,soloregrace1,shootgun3,shoothit4,shootenemy1,shootsync1,shootpause1,shootpause2,shootnofire1,shootsticky1,shootsmooth1,shootsmooth2,shootcoop1,shootghost1,shootghost2,shootghost3,shootmirror3,shootghost4,shootenemy2,shootcollide2,shootghost5,shootanim1,shoothp1,shootghost6,shoothp2,shootbump1,shootsmooth3,shootexit1,shootpause3,shootcollide3,shoothp3,shootexit2,asylumbald1,asylumlight1,asylumlight2,asylumbald2,asylumproxy1,logsoff1,cinedouble1,cinedouble2,cinedouble3,cineskip2,enemyfree1,chasehit1,chaselaugh1,chaseend1,chasepose1,sphinxdump1,sphinxdump2,sphinxlaugh1,chasehit2,chasepush1,chasepush2,joinrestart1,chasepush3,chasehit3,chaselaugh2,chaselaugh3,chasepush4,chaselaugh4,spawnrestart1,skipecho2,immortal1,chaseknock1,spawnheld1,spawnheld2,joinrestart2,enemyfree2,sphinxdump3,dumpsoff1,fallrelease1,loopbase1,ruinshare1,fallhold1,streamkeep1,soloclient1,spawnforce1,joinlatest1,joinunpause1,cineinput1,padmech2,samepc1,joinsave1,guardread1,joinlatest2,jointp3,jointp4,jointp5,jointp6,jointp7,balancefree1,binkstop2,trailfront1,spawnjoin1,skipnull1,joincine1,joincine2,spawnjoin2,spawnjoin3,jointp8,spawnercine1,bindkeep1,registrydiag1,spawnjoin4,spawnjoin5,spawnjoin6,teapotboom1,clothlog1, worldEvent="
+				+ ", features=enemyspawn,sharedtouch,netlog2,hive2,teeth3,pause11,hint3,board6,wake6,leech6,worldgen1,poster1,uitrace3,snout5,hair2,spawn3,drivefail4,leave1,ea1,pause12,shotend1,hairrel1,teapot3,settrace1,leave2,pause14,hairdiag1,jointp1,flower2,bomb2,seqev2,los1,bomb3,dress1,save1,ears1,hairpreset1,bomb4,dlcvar1,wpnlight2,trailerhud1,blackscreen2,nosync1,dlclight3,flower3,ears2,hairpreset2,bombfall1,dlcfx1,trail2,freecam2,joinview1,sessionhost1,savefwd1,autojoinstale1,savecheck1,flower4,teapotend1,ears3,hairauto1,icons1,earcrash1,trailfix2,losrepeat1,hostexit1,flower5,hairsettle2,ears4,statue1,sethidden2,haircode1,trailcode1,retirefps1,earphys1,shotleft1,hairshape3,trailtick3,shotretire2,earphys2,pepperdlc2,hostmenu2,hostgone1,earhead3,hairshape4,destroydirect1,hairpreset4,enemyshield1,aggrowake1,spectate1,hintdone1,bolterdiag1,shadowdiag1,shieldconst2,armour1,clothfit1,spectate2,enemyhidden1,platehit1,spectate3,platehit2,hitprobe2,clothdress2,umbrella2,damageable1,aiwake2,stickytarget1,npcshot3,sharedshots2,hostpawnpause1,shieldhit5,enemyrec1,ruinsticky1,shieldreact2,noretarget1,enemyfx2,ruinfocus2,jelly1,stall2,pickupname1,handover1,clientpause1,spawnhold1,decoy1off,brainoff1,cutscenehold1,shotdeflect2,loopfx1,ownanim4log,aibroken1,release2,staleaim1,shotkey1,skipjump1,shotcourse2,shotfx1,deathfix1,deathanim3,focus2,aliceshotdiag3,kynapsediag1,animsync1,deathfx1,aliceshotdiag4,deathfx2,aliceshotdiag5,deathanim4,fxguard1,lockaim1,slide1,interphold1,deathanim5,posesmooth1,interpstuck3,animtime2,skipfast1,treediag3,hintpause1,branch1,posesmooth2,midaction1,deathfx3,treediag2,posestep1,interpstuck4,rootopt2,flowerspent1,brainoff2,interpstuck5,trace2,replayloop1,readycheck2,nosolowarn1,frozen1,branch2,restart1,icewake1,ruinghost1,restartcrash1,cutsceneonce1,restart2,restart3,readycheck3,readycheck4,spectatecam1,joinskip1,autojoin2,autojoin3,londonhair1,hostfps1,londonbow1,londonbow2,londonbow3,proxyfreeze1,fpsfade1,fpsfade2,fpsfade3,spectatecine3,pausehold1,autojoin4,autojoin5,autojoin6,autojoin7,savekeep2,restartrejoin1,spawnsettle1,cutsceneautojoin2,skipqueue1,spectatecine4,hinthide1,hinthide2,hinthide3,hinthide4,hintcrash1,pausefocus1,pausefocus2,pausefast1,streamsync1,streamsync2,interpsync1,interpsync2,archguard1,archguard2,archguard3,archfix1,londonproxy1,loadhold1,chapterdiag1,chapterdiag2,startstate1,enginestate1,enginestate2,freshchapter1,haircarry2,haircarry3,leaveclear1,spectatesmooth1,shotowner1,dupresolve1,londonclose1,mapleave1,cinediag1,hairroot1,skipwait1,londonhairdup1,hairwarm1,spectatecast1,spectatecast2,spectatecast3,skipforce1,skipload1,spectateoff1,spectatepause1,hairskel1,hairown1,skipepoch1,binkskip1,hairwind1,hairpatch1,hairpatch2,hairsubstep1,spectatelondon1,spectatewhy1,hairrespawn1,haircollide1,hairflags1,animsets1,animsets2,giantsync1,giantwalk1,giantwalk2,giantwalk3,giantrestart1,giantrestart2,giantrestart3,giantrestart4,giantrestart5,giantrestart6,giantdress1,giantanim1,giantanim2,hairrespawn2,hairdump1,hairair1,hairstep1,hairstiff1,giantstomp2,giantstomp1,giantcrowd1,giantfloor1,giantfloor2,crowdsync1,crowdsync2,crowdsync3,crowdsync4,crowdsync5,crowdsync6,dressfast1,londonhairphys1,enemyrecsafe1,spectatecine1,hairrec1,hairsync1,hairsync2,hairrec2,proxyleave1,proxyleave2,enemyreset1,savenative1,menucursor1,fovtunnel1,londontpose1,platesync1,leversync1,sphinxcrash1,hitfxguard1,seqparent1,londontpose2,vtablediag1,bowfly1,platesync2,platesync3,catsync1,chesswatch1,chesswatch2,chesswatch3,spawndiag1,deadstop1,chesswatch4,jumppad1,stunfly1,jumppad2,hysteriacopy1,chesswatch5,watchsize1,enemyrectree1,projcauser1,stunhit1,flyreact1,copycollide1,ruinstun1,flyreact2,shotassist1,grabguard1,grabguard2,grabguard3,grabsync1,guardstop1,stunhit2,grabrescue1,novhysteria1,ruinknock1,meleeassist1,meleefx1,spawndup1,codedump1,recname1,looploop1,deathfx4,bloodfx1,minigame1,minigamediag1,rollshare1,rollwatch2,rollwatch3,watchicon1,rollcannon1,cannonsync2,restartcine1,restartcine2,shadowproxy1,safefind1,leverlock1,archproxy1,grabcam1,grabrec1,archfix2,grabcam2,spawndup2,fxguard2,skipblack1,enemykey1,enemyanimset1,shotboom1,platewake1,grabcam3,checkpointshare1,skipblack2,platewake2,curveshot1,locosync1,enemyemit1,plateanim1,headwake1,platedead1,locktarget1,slotguard1,plateanim2,tankbrain1,highaddr1,highaddr2,highaddr3,checkpointshare2,leavesafe1,blockshare1,blockwatch1,padhold1,paddoor1,paddoor2,blockreset1,blockreset2,padmech1,fxguard3,crabguard1,musicwatch1,crabguard2,musicwatch2,spawnpick1,crabguard3,branchhold1,musicwatch3,crabflick1,perf1,crabhost1,musicclick1,musicswf1,perf2,musicflash1,crabwalk1,stalestop1,spawnpick2,restartsync1,continue1,continue2,continue3,perf3,crabflick2,hostmenu3,musicleave1,visualshield1,continue4,swfdump1,perf4,swfdump2,joinwait1,branchhold2,shootshare1,sololeave1,continue5,crabstun1,touchonce1,exitcrash2,swfdump3,continue6,shootshare2,shootshare3,joinskip2,solojoin1,shootwatch1,shoothit1,shootshare4,shoothit2,shootshare5,shootcard1,shoothit3,shootshare6,shootfind1,shootshare7,solojoin2,shootshare8,shootmirror1,shootstart1,shootcard2,shootskip1,shootmirror2,shootstart2,shootshot2,shootcollide1,shootdeath1,soloregrace1,shootgun3,shoothit4,shootenemy1,shootsync1,shootpause1,shootpause2,shootnofire1,shootsticky1,shootsmooth1,shootsmooth2,shootcoop1,shootghost1,shootghost2,shootghost3,shootmirror3,shootghost4,shootenemy2,shootcollide2,shootghost5,shootanim1,shoothp1,shootghost6,shoothp2,shootbump1,shootsmooth3,shootexit1,shootpause3,shootcollide3,shoothp3,shootexit2,asylumbald1,asylumlight1,asylumlight2,asylumbald2,asylumproxy1,logsoff1,cinedouble1,cinedouble2,cinedouble3,cineskip2,enemyfree1,chasehit1,chaselaugh1,chaseend1,chasepose1,sphinxdump1,sphinxdump2,sphinxlaugh1,chasehit2,chasepush1,chasepush2,joinrestart1,chasepush3,chasehit3,chaselaugh2,chaselaugh3,chasepush4,chaselaugh4,spawnrestart1,skipecho2,immortal1,chaseknock1,spawnheld1,spawnheld2,joinrestart2,enemyfree2,sphinxdump3,dumpsoff1,fallrelease1,loopbase1,ruinshare1,fallhold1,streamkeep1,soloclient1,spawnforce1,joinlatest1,joinunpause1,cineinput1,padmech2,samepc1,joinsave1,guardread1,joinlatest2,jointp3,jointp4,jointp5,jointp6,jointp7,balancefree1,binkstop2,trailfront1,spawnjoin1,skipnull1,joincine1,joincine2,spawnjoin2,spawnjoin3,jointp8,spawnercine1,bindkeep1,registrydiag1,spawnjoin4,spawnjoin5,spawnjoin6,teapotboom1,clothlog1,crowdtouch1,cpjoin1,cpjoin2,skipevents1,breakmem1,kynapseleave1,skiponce1,giantfix1,hivelocal1,chapterflag1,joinfresh1,giantfix2,giantfix3,joinrestart3,joinrestart4,giantsave1,giantsave2,joincontinue1,cinesync1,breakrestart1,joincontinue2,giantleave1,kynapseguard1, worldEvent="
 				+ std::to_string(sizeof(SharedWorldEventPayload)) + '.');
 			LogCrashSiteCode(); // codedump1
 			FindDuplicateObjectEx();
@@ -72666,6 +73670,35 @@ namespace AliceCoop
 				again.entityKey = g_joinCheckpointKey;
 				again.flags = 1u | 4u;
 				Log("JOINTP the host's checkpoint is fired again here, now that this Alice is with the host (jointp6).");
+				// giantsave1 (13.11 19:00:56: the client back from the menu
+				// was still the Wonderland Alice when this fired, so the
+				// checkpoint was saved as "archetype 1" and her own restart
+				// would only bring the Wonderland Alice back). In the giant
+				// section next to the giant host, the save is made as the
+				// giant one - a later checkpoint restart (joinrestart4) then
+				// loads it the way Continue does, giant mode and all.
+				{
+					AAliceGameInfo* const game = localPawn->WorldInfo && localPawn->WorldInfo->Game
+						&& localPawn->WorldInfo->Game->IsA(AAliceGameInfo::StaticClass())
+						? reinterpret_cast<AAliceGameInfo*>(localPawn->WorldInfo->Game) : nullptr;
+					const bool hostGiant = g_remotePresentation.valid
+						&& (g_remotePresentation.state.archetype & 0x0F)
+							== static_cast<std::uint8_t>(EAliceArcheType::AType_GiantMode);
+					// giantsave2 (13.11 19:10:34: a restart came while the
+					// archetype was held, the client loaded for ever) - off
+					constexpr bool kGiantSave = false;
+					if (kGiantSave && game && hostGiant && _stricmp(g_currentMap.c_str(), "Chapter4_W3_P") == 0
+						&& localPawn->ArcheTypeID == EAliceArcheType::AType_Wonderland)
+					{
+						g_giantSavePawn = localPawn;
+						g_giantSavePawnArch = static_cast<int>(localPawn->ArcheTypeID);
+						g_giantSaveGameArch = static_cast<int>(game->AliceArcheTypeID);
+						localPawn->ArcheTypeID = EAliceArcheType::AType_GiantMode;
+						game->AliceArcheTypeID = EAliceArcheType::AType_GiantMode;
+						g_giantSaveHoldUntil = Clock::now() + std::chrono::seconds(3);
+						Log("JOINTP the checkpoint is saved as the giant Alice, as on the host (giantsave1).");
+					}
+				}
 				OnRemoteSharedSeqEvent(again);
 			}
 			g_joinCheckpointKey = 0;
@@ -72847,9 +73880,11 @@ namespace AliceCoop
 		{ PerfScope perfScope_("TickFreeCamera"); TickFreeCamera(); }
 		{ PerfScope perfScope_("TickRealWorldSpectate"); TickRealWorldSpectate(localPawn); }
 		TickProxyHairRespawn(); // hairrespawn1
+		TickProxyGiantLeave(); // giantleave1
 		TickRestartRejoin(); // restartrejoin1
 		TickFactoryArchetypeGuard(localPawn); // archguard1
 		TickLondonArchetypeFix(localPawn); // archfix1
+		TickGiantArchetypeFix(localPawn); // giantfix1
 		TickLoadFallHold(localPawn); // loadhold1
 		TickAliceMatineeLevelKeep(localPawn); // streamkeep1
 		TickCutsceneFallHold(localPawn); // fallhold1
@@ -72858,6 +73893,8 @@ namespace AliceCoop
 		TickStreamLevelSync(); // streamsync1
 		TickJoinStreamKeep(); // jointp5
 		TickPeerArrival(); // joinlatest1 / joinunpause1
+		TickJoinAutoRestart(); // joinrestart3
+		TickJoinSelfRestart(); // joinrestart4
 		TickInterpStateSync(); // interpsync1
 		TickBalanceSync(); // platesync1
 		TickVtableDiag(); // vtablediag1

@@ -8,6 +8,8 @@
 namespace AliceCoop
 {
 	void Initialize();
+	// kynapseguard1: a line in the co-op log from outside it (crash fixes)
+	void LogFromFix(const std::string& message);
 	// trailfront1: puts the crash-trail handler in front of the crash
 	// reporter; call right after CrashHandler::Install().
 	void MoveCrashTrailHandlerToFront();

@@ -1,5 +1,9 @@
 #include "Common.hpp"
 #include "Features.hpp"
+#include "Coop/CoopClient.hpp"
+
+#include <atomic>
+#include <cstring>
 
 safetyhook::InlineHook Localize;
 
@@ -80,6 +84,68 @@ static DWORD __cdecl Localize_Hook(DWORD* a1, void* a2, const wchar_t* a3, int a
 	return ret;
 }
 
+// kynapseguard1 (13.11 17:07:23 and 20:02:56, both games, ~1 s into the
+// boat chapter (Chapter2_W2_P) chosen after the giant section): Kynapse's
+// per-frame update (Steam FUN_00d179f0 -> FUN_00d27b80 -> a virtual ->
+// FUN_00d33940) adds an object whose "dirty" flag is set to its world's
+// database - and that world is gone: FUN_00d33940 was called with
+// this = 0x0000000C (a null world + 0xC) and read +4 of it. It is a
+// __thiscall (database, item, bool) that returns 0 when the item could not
+// be added; with no database there is nothing to add to, so that is what
+// it returns now. The function is found by its prologue (PUSH -1; PUSH its
+// own SEH handler) in the two builds seen.
+static safetyhook::InlineHook KynapseDatabaseAdd{};
+static std::atomic<int> KynapseGuardHits{ 0 };
+
+static int __fastcall KynapseDatabaseAdd_Hook(void* self, void* /*edx*/, int item, int flag)
+{
+	if (reinterpret_cast<uintptr_t>(self) < 0x10000)
+	{
+		const int hits = ++KynapseGuardHits;
+		if (hits <= 5)
+		{
+			char text[200];
+			sprintf_s(text, "KYNAPSEGUARD an AI object was added to a world that is gone"
+				" (database %p, item 0x%08X): skipped, not a crash (kynapseguard1, #%d).",
+				self, static_cast<unsigned>(item), hits);
+			AliceCoop::LogFromFix(text);
+		}
+		return 0;
+	}
+	return KynapseDatabaseAdd.unsafe_thiscall<int>(self, item, flag);
+}
+
+static void ApplyKynapseGuard()
+{
+	const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+	struct Candidate { uintptr_t address; uint32_t handler; };
+	// the exe's own addresses (image base 0x400000) and the SEH handler
+	// each pushes: Steam (current) and EA
+	const Candidate candidates[] = {
+		{ 0x00D33940, 0x0105F866 },
+		{ 0x00DA7070, 0x010D4916 },
+	};
+	for (const Candidate& c : candidates)
+	{
+		const uintptr_t address = base + (c.address - 0x400000);
+		uint8_t expected[7] = { 0x6A, 0xFF, 0x68, 0, 0, 0, 0 };
+		const uint32_t handler = static_cast<uint32_t>(base + (c.handler - 0x400000));
+		std::memcpy(expected + 3, &handler, 4);
+		if (!MemoryHelper::IsReadable(reinterpret_cast<const void*>(address), sizeof(expected))
+			|| std::memcmp(reinterpret_cast<const void*>(address), expected, sizeof(expected)) != 0)
+		{
+			continue;
+		}
+		KynapseDatabaseAdd = HookHelper::CreateHook(reinterpret_cast<void*>(address), &KynapseDatabaseAdd_Hook);
+		char text[160];
+		sprintf_s(text, "KYNAPSEGUARD installed at exe+0x%X (kynapseguard1).",
+			static_cast<unsigned>(address - base));
+		AliceCoop::LogFromFix(text);
+		return;
+	}
+	AliceCoop::LogFromFix("KYNAPSEGUARD not installed: the function was not found in this build (kynapseguard1).");
+}
+
 static void OnUnattachedCollision(safetyhook::Context& ctx)
 {
 	*reinterpret_cast<uint32_t*>(ctx.esi + 0x3C) |= 0x80;
@@ -97,6 +163,7 @@ static void OnFxActorLoop(safetyhook::Context& ctx)
 
 void ApplyCrashFixes()
 {
+	ApplyKynapseGuard(); // kynapseguard1: on even without the other crash fixes
 	if (!CrashFixes) return;
 
 	// Hash-table race condition (Localize)
