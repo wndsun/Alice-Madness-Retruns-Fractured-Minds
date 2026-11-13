@@ -26,7 +26,7 @@ Teleportation can often solve these problems!
 
 If restarting the game or the level doesn't fix the bugs, try selecting a different chapter first, then return to the chapter you actually want to play.
 
-Also, remember to delete the files located in the `AliceCoop\client-saves` folder to remove the most recently saved checkpoints.
+Also, remember to delete the files located in the `AliceCoop\client-saves` folder to remove the most recently saved checkpoints. **This must be done by the client.**
 
 If the game crashes during startup or at certain points while playing, try launching the game again.
 
