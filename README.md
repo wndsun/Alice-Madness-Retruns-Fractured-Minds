@@ -24,7 +24,21 @@ Based on / fork of [Alice Co-op](https://github.com/docwitson/Alice-Madness-Retu
    Client: choose *Client*, enter the host's LAN/VPN address → *Save*.
 3. Restart the game after changing the role. The host enters gameplay, the client presses **L** to join.
 
-Full guide: [docs/INSTALL.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/docs/INSTALL.md)
+## Full guide:
+
+English: [docs/INSTALL.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/docs/INSTALL.md)
+
+Русский: [docs/INSTALL_RU.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/docs/INSTALL_RU.md)
+
+日本語: [docs/INSTALL_JP.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/docs/INSTALL_JP.md)
+
+Español: [docs/INSTALL_SP.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/docs/INSTALL_SP.md)
+
+Italiano: [docs/INSTALL_IT.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/docs/INSTALL_IT.md)
+
+Français: [docs/INSTALL_FR.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/docs/INSTALL_FR.md)
+
+Deutsch: [docs/INSTALL_GE.md](https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/blob/main/docs/INSTALL_GE.md)
 
 ### What's new compared to Alice Co-op 0.1.0-alpha.1
 - In-game co-op menu (**M**): role, server address and port; the host can start the server from the menu. No external launcher needed.
