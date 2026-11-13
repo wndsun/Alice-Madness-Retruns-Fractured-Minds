@@ -51,6 +51,6 @@ Achte darauf, diesen Ordner regelmäßig zu leeren, da angesammelte Absturzproto
 
 Bitte beachte, dass diese Mod möglicherweise nicht immer perfekt funktioniert. Während des Spielens können Bugs, Abstürze oder andere Probleme auftreten.
 
-Wenn du Fragen hast oder auf Probleme stößt, melde sie bitte hier:
+Wenn du Fragen hast oder auf Probleme stößt, melde sie bitte hier: https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/issues
 
 **Viel Spaß beim Spielen!**

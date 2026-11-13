@@ -51,6 +51,6 @@ Make sure to clean this folder regularly, as accumulated crash dump files can ta
 
 Please keep in mind that this mod may not always work perfectly. You may encounter bugs, crashes, or other issues while playing.
 
-If you have any questions or encounter problems, please report them here:
+If you have any questions or encounter problems, please report them here: https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/issues
 
 **Have fun playing!**

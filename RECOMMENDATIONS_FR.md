@@ -51,6 +51,6 @@ Pensez à nettoyer régulièrement ce dossier, car l'accumulation de fichiers de
 
 Veuillez garder à l'esprit que ce mod ne fonctionnera pas toujours parfaitement. Vous pourriez rencontrer des bugs, des plantages ou d'autres problèmes pendant vos parties.
 
-Si vous avez des questions ou rencontrez des problèmes, veuillez les signaler ici :
+Si vous avez des questions ou rencontrez des problèmes, veuillez les signaler ici : https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/issues
 
 **Amusez-vous bien !**

@@ -51,6 +51,6 @@ Hay una carpeta llamada `CrashDump` en el directorio del juego. Esta almacena re
 
 Ten en cuenta que este mod puede no funcionar perfectamente en todo momento. Es posible que encuentres errores, cierres inesperados u otros problemas durante la partida.
 
-Si tienes alguna pregunta o encuentras algún problema, repórtalo aquí:
+Si tienes alguna pregunta o encuentras algún problema, repórtalo aquí: https://github.com/wndsun/Alice-Madness-Retruns-Fractured-Minds/issues
 
 **¡Que te diviertas jugando!**
